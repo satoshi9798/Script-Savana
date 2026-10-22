@@ -529,7 +529,7 @@ UIS.InputBegan:Connect(function(input,processed)
 end)
 
 local hitboxEnabled=false; local hitboxRange=50
-local specialHitboxEnabled=false; local specialHitboxRange=30
+local specialHitboxEnabled=false; local specialHitboxRange=50
 local autoGrabEnabled=false; local autoGrabRange=50
 local speedValue=16; local speedEnabled=false
 local infiniteStats=false; local sempreDiaEnabled=false
@@ -612,7 +612,7 @@ hitboxFrame,setHitbox,getHitboxState,setHitboxValue,getHitboxValue=toggleSlider(
 SatoshiAddBind(auraFrame,"Aura",function() setKill(not getKillState()) end)
 SatoshiAddBind(hitboxFrame,"Hitbox",function() setHitbox(not getHitboxState()) end)
 
-_,setSpecialHitbox,getSpecialHitboxState,setSpecialHitboxValue,getSpecialHitboxValue=toggleSlider(pages.Combat,"Hitbox Grab / Pounce","Amplia o alcance do ataque especial de agarrar.",false,0,60,30,function(v) specialHitboxEnabled=v end,function(v) specialHitboxRange=v end)
+_,setSpecialHitbox,getSpecialHitboxState,setSpecialHitboxValue,getSpecialHitboxValue=toggleSlider(pages.Combat,"Hitbox Grab / Pounce","Amplia o alcance do ataque especial de agarrar (Tecla F ou Botão Flutuante).",false,0,100,50,function(v) specialHitboxEnabled=v end,function(v) specialHitboxRange=v end)
 _,setGrab,getGrabState,setGrabValue,getGrabValue=toggleSlider(pages.Combat,"Auto Grab (30 Studs Acima)","Fica a 30 studs acima do inimigo mantendo a colisão normal.",false,0,150,50,function(v) autoGrabEnabled=v end,function(v) autoGrabRange=v end)
 
 --============================================================
@@ -1099,44 +1099,61 @@ RunService.Heartbeat:Connect(function()
 end)
 
 --============================================================
--- HITBOX GRAB & ATAQUES
+-- HITBOX GRAB & ATAQUES (OTIMIZADO)
 --============================================================
-local PounceRemote=ReplicatedStorage:WaitForChild("SpecialAttackRemoteEvent_PounceAttack")
-local specialHitboxLast=0
+local PounceRemote = ReplicatedStorage:WaitForChild("SpecialAttackRemoteEvent_PounceAttack", 10)
+local specialHitboxLast = 0
+
 function fireSpecialHitbox()
-    if not specialHitboxEnabled or os.clock()-specialHitboxLast<.35 then return end
-    local char=LP.Character; local myRoot=char and char:FindFirstChild("HumanoidRootPart")
+    if not specialHitboxEnabled or os.clock() - specialHitboxLast < 0.35 then return end
+    local char = LP.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
     if not myRoot then return end
-    for _,animal in ipairs(CollectionService:GetTagged("Animals")) do
-        if animal~=char and animal:IsA("Model") and not SatoshiIsWhitelisted(animal) then
-            local hum=animal:FindFirstChild("Humanoid")
-            local root=animal:FindFirstChild("HumanoidRootPart")
-            local folder=animal:FindFirstChild("RagdollColliderParts")
-            local rag=folder and folder:FindFirstChild("RagdollColliderRootPart")
-            if hum and hum.Health>0 and root and rag then
-                if (root.Position-myRoot.Position).Magnitude<=specialHitboxRange then
-                    specialHitboxLast=os.clock()
-                    pcall(function() PounceRemote:FireServer(hum,rag) end)
+
+    for _, animal in ipairs(CollectionService:GetTagged("Animals")) do
+        if animal ~= char and animal:IsA("Model") and not SatoshiIsWhitelisted(animal) then
+            local hum = animal:FindFirstChildOfClass("Humanoid")
+            local root = animal:FindFirstChild("HumanoidRootPart") or animal.PrimaryPart
+            local folder = animal:FindFirstChild("RagdollColliderParts")
+            local rag = (folder and folder:FindFirstChild("RagdollColliderRootPart")) or root
+
+            if hum and hum.Health > 0 and root and rag then
+                local dist = (root.Position - myRoot.Position).Magnitude
+                if dist <= specialHitboxRange then
+                    specialHitboxLast = os.clock()
+                    pcall(function()
+                        if PounceRemote then
+                            PounceRemote:FireServer(hum, rag)
+                        end
+                    end)
                     break
                 end
             end
         end
     end
 end
-UIS.InputBegan:Connect(function(input) if input.KeyCode==Enum.KeyCode.F then fireSpecialHitbox() end end)
 
-local hitboxLast=0
+-- Ativação via tecla F
+UIS.InputBegan:Connect(function(input, processed)
+    if not processed and input.KeyCode == Enum.KeyCode.F then
+        fireSpecialHitbox()
+    end
+end)
+
+local hitboxLast = 0
 function fireHitboxAttack()
-    if not hitboxEnabled or os.clock()-hitboxLast<.20 then return end
-    hitboxLast=os.clock()
-    local char=LP.Character; local myRoot=char and char:FindFirstChild("HumanoidRootPart")
+    if not hitboxEnabled or os.clock() - hitboxLast < 0.20 then return end
+    hitboxLast = os.clock()
+    local char = LP.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
     if not myRoot then return end
-    for _,model in ipairs(CollectionService:GetTagged("Animals")) do
-        if model~=char and model:IsA("Model") and not SatoshiIsWhitelisted(model) then
-            local hum=model:FindFirstChildOfClass("Humanoid")
-            local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-            if hum and hum.Health>0 and root then
-                if (root.Position-myRoot.Position).Magnitude<=hitboxRange then
+
+    for _, model in ipairs(CollectionService:GetTagged("Animals")) do
+        if model ~= char and model:IsA("Model") and not SatoshiIsWhitelisted(model) then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+            if hum and hum.Health > 0 and root then
+                if (root.Position - myRoot.Position).Magnitude <= hitboxRange then
                     pcall(function() AttackRemote:FireServer(hum) end)
                     break
                 end
@@ -1144,7 +1161,12 @@ function fireHitboxAttack()
         end
     end
 end
-UIS.InputBegan:Connect(function(input,processed) if not processed and input.UserInputType==Enum.UserInputType.MouseButton1 then fireHitboxAttack() end end)
+
+UIS.InputBegan:Connect(function(input, processed)
+    if not processed and input.UserInputType == Enum.UserInputType.MouseButton1 then
+        fireHitboxAttack()
+    end
+end)
 
 --============================================================
 -- LOOP GERAL DE STATUS E MOVIMENTO
@@ -1204,6 +1226,7 @@ end
 SatoshiFloatDefs={
     Aura={title="AUTO ATAQUE",getter=getKillState,setter=setKill},
     Hitbox={title="HITBOX",getter=getHitboxState,setter=setHitbox},
+    SpecialHitbox={title="HITBOX GRAB",getter=getSpecialHitboxState,setter=function(v) setSpecialHitboxValue(v and 50 or 0); fireSpecialHitbox() end},
     Grab={title="AUTO AGARRAR",getter=getGrabState,setter=setGrab},
     Water={title="BEBER ÁGUA",getter=getApenasSedeState,setter=setApenasSede},
     Underground={title="SUBSOLO",getter=getUnderState,setter=setUnder},
@@ -1295,10 +1318,11 @@ task.spawn(function()
     end
 end)
 
-floatOrder={"Aura","Hitbox","Grab","Water","Underground"}
+floatOrder={"Aura","Hitbox","SpecialHitbox","Grab","Water","Underground"}
 floatLabels={
     Aura="Auto Ataque",
-    Hitbox="Hitbox",
+    Hitbox="Hitbox Normal",
+    SpecialHitbox="Hitbox Grab",
     Grab="Auto Agarrar",
     Water="Beber Água",
     Underground="Subsolo"
