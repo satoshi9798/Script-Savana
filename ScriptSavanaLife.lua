@@ -288,7 +288,6 @@ local PlayerGui = LP:WaitForChild("PlayerGui")
 --============================================================
 
 local FLY_SPEED = 55
-local UNDERGROUND_Y = 10
 local FULL_VALUE = 99.5
 
 --============================================================
@@ -338,7 +337,7 @@ end)
 --============================================================
 
 local canStartText = "nil"
-local function canStart()
+local function uCanStart()
 	local ok, result = pcall(function()
 		if Utils and Utils.CanEatDrink and Utils.CanEatDrink.CanStart then
 			return Utils.CanEatDrink.CanStart(getChar())
@@ -532,7 +531,6 @@ end)
 local hitboxEnabled=false; local hitboxRange=50
 local specialHitboxEnabled=false; local specialHitboxRange=30
 local autoGrabEnabled=false; local autoGrabRange=50
-local autoDesgrabEnabled=false
 local speedValue=16; local speedEnabled=false
 local infiniteStats=false; local sempreDiaEnabled=false
 
@@ -609,14 +607,96 @@ _,setHighlight,getHighlightState=toggle(pages.Visual,"Contorno","Destaca o perso
 _,setSempreDia,getSempreDiaState=toggle(pages.Visual,"Sempre Dia","Trava o relógio visual em 12:00.",false,function(v) sempreDiaEnabled=v end)
 
 killAuraButton=Instance.new("TextButton")
-auraFrame,setKill,getKillState=toggle(pages.Combat,"Aura de Ataque","Ataca 1 alvo por vez, priorizando o mais próximo em até 50 studs.",false,function(v) killAuraEnabled=v; lastAttack=0 end)
+auraFrame,setKill,getKillState=toggle(pages.Combat,"Aura de Ataque","Ataca todos os alvos no raio em até 50 studs.",false,function(v) killAuraEnabled=v; lastAttack=0 end)
 hitboxFrame,setHitbox,getHitboxState,setHitboxValue,getHitboxValue=toggleSlider(pages.Combat,"Hitbox","Amplia o alcance do ataque manual.",false,0,60,50,function(v) hitboxEnabled=v end,function(v) hitboxRange=v end)
 SatoshiAddBind(auraFrame,"Aura",function() setKill(not getKillState()) end)
 SatoshiAddBind(hitboxFrame,"Hitbox",function() setHitbox(not getHitboxState()) end)
 
 _,setSpecialHitbox,getSpecialHitboxState,setSpecialHitboxValue,getSpecialHitboxValue=toggleSlider(pages.Combat,"Hitbox Grab / Pounce","Amplia o alcance do ataque especial de agarrar.",false,0,60,30,function(v) specialHitboxEnabled=v end,function(v) specialHitboxRange=v end)
-_,setGrab,getGrabState,setGrabValue,getGrabValue=toggleSlider(pages.Combat,"Auto Grab (30 Studs Acima)","Fica a 30 studs acima do inimigo acompanhando onde ele for.",false,0,150,50,function(v) autoGrabEnabled=v end,function(v) autoGrabRange=v end)
-_,setDesgrab,getDesgrabState=toggle(pages.Combat,"Desagarrar Automático","Executa automaticamente o minigame para se soltar.",false,function(v) autoDesgrabEnabled=v end)
+_,setGrab,getGrabState,setGrabValue,getGrabValue=toggleSlider(pages.Combat,"Auto Grab (30 Studs Acima)","Fica a 30 studs acima do inimigo mantendo a colisão normal.",false,0,150,50,function(v) autoGrabEnabled=v end,function(v) autoGrabRange=v end)
+
+--============================================================
+-- LOGICA DO DESAGARRAR AUTOMÁTICO V2 (SINCRONIZADA)
+--============================================================
+local LatchedPlayersRemote = ReplicatedStorage:WaitForChild("LatchedPlayersNotifyRemoteEvent", 10)
+local LatchConfig = nil
+pcall(function()
+    LatchConfig = require(ReplicatedStorage.AnimalGameSharedCore.LatchEscapeConfig)
+end)
+
+getgenv().AUTO_DESGRAB = false
+local latchedPlayersList = {}
+local escapeThreadInstance = nil
+
+local function stopEscapeThread()
+    if escapeThreadInstance then
+        task.cancel(escapeThreadInstance)
+        escapeThreadInstance = nil
+    end
+end
+
+local function startEscapeThread()
+    stopEscapeThread()
+    escapeThreadInstance = task.spawn(function()
+        while getgenv().AUTO_DESGRAB and #latchedPlayersList > 0 do
+            local char = LP.Character
+            if not char then break end
+
+            if not LatchConfig then
+                pcall(function()
+                    LatchConfig = require(ReplicatedStorage.AnimalGameSharedCore.LatchEscapeConfig)
+                end)
+            end
+
+            local speed = 1.0
+            if LatchConfig and LatchConfig.getRingScaleSpeed then
+                speed = LatchConfig.getRingScaleSpeed(char, latchedPlayersList)
+            end
+
+            local minScale = (LatchConfig and LatchConfig.MIN_CORRECT_SCALE) or 0.38
+            local maxScale = (LatchConfig and LatchConfig.MAX_CORRECT_SCALE) or 0.56
+            local maxSize  = (LatchConfig and LatchConfig.MAX_SIZE_SCALE) or 1.05
+            local pauseTime = (LatchConfig and LatchConfig.PAUSE_TIME) or 0.5
+            local nextPressTime = (LatchConfig and LatchConfig.TIME_BEFORE_NEXT_PRESS_AFTER_PAUSE) or 0.15
+
+            local targetScale = (minScale + maxScale) / 2
+            local travel = maxSize - targetScale
+            local timeToHit = travel / speed
+
+            task.wait(timeToHit)
+
+            if not getgenv().AUTO_DESGRAB or #latchedPlayersList <= 0 then break end
+
+            if LatchedPlayersRemote then
+                LatchedPlayersRemote:FireServer()
+            end
+
+            task.wait(pauseTime + nextPressTime + 0.02)
+        end
+    end)
+end
+
+if LatchedPlayersRemote then
+    if getgenv().AUTO_DESGRAB_CONNECTION then
+        getgenv().AUTO_DESGRAB_CONNECTION:Disconnect()
+    end
+    getgenv().AUTO_DESGRAB_CONNECTION = LatchedPlayersRemote.OnClientEvent:Connect(function(players)
+        if type(players) ~= "table" then return end
+        latchedPlayersList = players
+        if #players == 0 then
+            stopEscapeThread()
+            return
+        end
+        if getgenv().AUTO_DESGRAB then
+            startEscapeThread()
+        end
+    end)
+end
+
+_,setDesgrab,getDesgrabState=toggle(pages.Combat,"Desagarrar Automático","Executa automaticamente o minigame de fuga sincronizado.",false,function(v)
+    getgenv().AUTO_DESGRAB = v
+    if not v then stopEscapeThread() end
+end)
 
 speedFrame,setSpeed,getSpeedState,setSpeedValue,getSpeedValue=toggleSlider(pages.Move,"Velocidade","ON/OFF + velocidade + tecla configurável.",false,0,100,16,function(v) speedEnabled=v end,function(v) speedValue=v end)
 SatoshiAddBind(speedFrame,"Speed",function() setSpeed(not getSpeedState()) end)
@@ -902,31 +982,32 @@ Players.PlayerRemoving:Connect(removeESP)
 for _,player in ipairs(Players:GetPlayers()) do if player~=LP then if player.Character then createESP(player) end player.CharacterAdded:Connect(function() task.wait(1); createESP(player) end) end end
 
 --============================================================
--- KILL AURA & COMBAT
+-- KILL AURA (ATACA TODOS NO RAIO SIMULTANEAMENTE)
 --============================================================
 local AttackRemote=ReplicatedStorage:WaitForChild("AttackHandlerRemoteEvent")
 function attackAura()
     local char=LP.Character; if not char then return end
     local myRoot=char:FindFirstChild("HumanoidRootPart"); if not myRoot then return end
     if char:GetAttribute("IsSpawnProtected") or char:GetAttribute("MovementDisabled") or char:GetAttribute("IsBeingCarried") or char:GetAttribute("IsPouncing") then return end
-    local bestHum,bestDistance=nil,51
+    
     for _,model in ipairs(CollectionService:GetTagged("Animals")) do
         if model~=char and model:IsA("Model") and not SatoshiIsWhitelisted(model) and not model:GetAttribute("IsPouncing") and not model:GetAttribute("IsSpawnProtected") then
             local hum=model:FindFirstChildOfClass("Humanoid")
             local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
             if hum and hum.Health>0 and root then
                 local d=(root.Position-myRoot.Position).Magnitude
-                if d<=50 and d<bestDistance then bestHum=hum; bestDistance=d end
+                if d<=50 then
+                    pcall(function() AttackRemote:FireServer(hum) end)
+                end
             end
         end
     end
-    if killAuraEnabled and bestHum and bestHum.Health>0 then pcall(function() AttackRemote:FireServer(bestHum) end) end
 end
 killAuraButton.MouseButton1Click:Connect(function() killAuraEnabled=not killAuraEnabled; lastAttack=0 end)
-RunService.Heartbeat:Connect(function() if killAuraEnabled and os.clock()-lastAttack>=0.25 then lastAttack=os.clock(); attackAura() end end)
+RunService.Heartbeat:Connect(function() if killAuraEnabled and os.clock()-lastAttack>=0.20 then lastAttack=os.clock(); attackAura() end end)
 
 --============================================================
--- LÓGICA DO AUTO GRAB (30 STUDS ACIMA DO INIMIGO ACOMPANHANDO)
+-- LÓGICA DO AUTO GRAB (COM COLISÃO NORMAL, SEM AFUNDAR)
 --============================================================
 RunService.Heartbeat:Connect(function()
     if not autoGrabEnabled then return end
@@ -952,8 +1033,6 @@ RunService.Heartbeat:Connect(function()
     end
 
     if bestTargetRoot then
-        SatoshiSetNoclip(true)
-        -- Posiciona exatamente 30 studs acima do centro do inimigo
         local targetPos = bestTargetRoot.Position + Vector3.new(0, 30, 0)
         myRoot.CFrame = CFrame.new(targetPos, bestTargetRoot.Position)
         myRoot.AssemblyLinearVelocity = Vector3.zero
@@ -962,7 +1041,7 @@ RunService.Heartbeat:Connect(function()
 end)
 
 --============================================================
--- UNDERGROUND / INVISÍVEL
+-- SUBSOLO / INVISÍVEL CORRIGIDO
 --============================================================
 local undergroundEnabled=false; local undergroundY=nil; local surfaceY=nil; local undergroundToken=0
 disableUnderground=function()
@@ -971,7 +1050,9 @@ disableUnderground=function()
     local hum=char and char:FindFirstChildOfClass("Humanoid")
     if hum then hum.CameraOffset=Vector3.zero end
     if not flyEnabled then SatoshiSetNoclip(false) end
-    if root and surfaceY then root.CFrame=CFrame.new(root.Position.X,surfaceY,root.Position.Z)*(root.CFrame-root.CFrame.Position) end
+    if root and surfaceY then 
+        root.CFrame = CFrame.new(root.Position.X, surfaceY + 3, root.Position.Z)*(root.CFrame-root.CFrame.Position) 
+    end
     surfaceY=nil; undergroundY=nil; undergroundButton.Text="INVISÍVEL / UNDERGROUND: OFF"
 end
 
@@ -982,17 +1063,24 @@ enableUnderground=function()
     task.spawn(function()
         local root=getRoot(); local original=root.CFrame; surfaceY=root.Position.Y
         local foundY=nil
-        for offset=1,250 do
+        for offset=5,120,5 do
             if not undergroundEnabled or undergroundToken~=token then root.CFrame=original; return end
-            root.CFrame=CFrame.new(original.Position.X,surfaceY-offset,original.Position.Z)*(original-original.Position)
+            root.CFrame=CFrame.new(original.Position.X, surfaceY-offset, original.Position.Z)*(original-original.Position)
             root.AssemblyLinearVelocity=Vector3.zero
-            RunService.Heartbeat:Wait()
-            if uCanStart()=="Drink" then foundY=root.Position.Y; break end
+            task.wait(0.05)
+            local ray = Workspace:Raycast(root.Position + Vector3.new(0, 10, 0), Vector3.new(0, -20, 0))
+            if ray and ray.Material ~= Enum.Material.Water then
+                foundY = ray.Position.Y - 4
+                break
+            end
         end
-        if not foundY then root.CFrame=original; undergroundEnabled=false; undergroundButton.Text="INVISÍVEL: NÃO ACHADO"; return end
+        if not foundY then 
+            foundY = surfaceY - 15 
+        end
+        
         undergroundY=foundY; SatoshiSetNoclip(true)
         local hum=LP.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.CameraOffset=Vector3.new(0,surfaceY-undergroundY,0) end
+        if hum then hum.CameraOffset=Vector3.new(0, surfaceY - undergroundY, 0) end
         undergroundButton.Text="INVISÍVEL / UNDERGROUND: ON"
     end)
 end
@@ -1005,7 +1093,9 @@ RunService.Heartbeat:Connect(function()
     SatoshiSetNoclip(true)
     root.AssemblyLinearVelocity=Vector3.zero; root.AssemblyAngularVelocity=Vector3.zero
     local cf=root.CFrame
-    if math.abs(root.Position.Y-undergroundY)>0.03 then root.CFrame=CFrame.new(cf.Position.X,undergroundY,cf.Position.Z)*(cf-cf.Position) end
+    if math.abs(root.Position.Y-undergroundY)>0.03 then 
+        root.CFrame=CFrame.new(cf.Position.X, undergroundY, cf.Position.Z)*(cf-cf.Position) 
+    end
 end)
 
 --============================================================
@@ -1297,7 +1387,7 @@ function SatoshiApplyProfile(data)
     if tg.Highlight~=nil then setHighlight(tg.Highlight) end
     if tg.SempreDia~=nil then setSempreDia(tg.SempreDia) end
     if tg.Hitbox~=nil then setHitbox(tg.Hitbox) end
-    if tg.SpecialHitbox~=nil then setSpecialHitbox(tg.SpecialHitbox) end
+    if tg.SpecialHitbox~=nil then setSpecialHitboxValue(tg.SpecialHitbox) end
     if tg.Aura~=nil then setKill(tg.Aura) end
     if tg.Grab~=nil then setGrab(tg.Grab) end
     if tg.Desgrab~=nil then setDesgrab(tg.Desgrab) end
@@ -1384,7 +1474,7 @@ action(pages.Profiles,"🗑 EXCLUIR PERFIL",function()
     local path=SatoshiProfilePath(name)
     if isfile(path) then
         pcall(function() delfile(path) end)
-        profileStatus.Text="Perfil excluído: "..name
+        profileStatus.Test="Perfil excluído: "..name
     else
         profileStatus.Text="Perfil não encontrado: "..name
     end
