@@ -28,8 +28,6 @@ if not requestFunc then
     return
 end
 
--- WID pseudônimo/persistente: tenta usar um identificador oferecido pelo ambiente.
--- Não coleta IMEI, MAC ou serial físico.
 local function getSatoshiWID()
     local candidates = {
         function() return gethwid and gethwid() end,
@@ -37,8 +35,6 @@ local function getSatoshiWID()
         function()
             if identifyexecutor then
                 local a,b = identifyexecutor()
-                -- fallback NÃO é suficiente sozinho para diferenciar dispositivos,
-                -- então só é usado junto com ClientId abaixo.
                 return nil
             end
         end,
@@ -154,7 +150,6 @@ local function validateOrActivateKey(key)
     })
     local patchCode=patch and (patch.StatusCode or patch.Status)
     if patchCode~=200 then
-        -- Pode ter ocorrido corrida: outra instalação ativou entre GET e PATCH.
         return false,"ATIVAÇÃO RECUSADA ("..tostring(patchCode)..")"
     end
     return true,"KEY ATIVADA - ACESSO LIBERADO"
@@ -248,7 +243,6 @@ if keyBox.Text~="" then
     task.defer(doLogin)
 end
 
--- Arrastar login pelo topo
 local UISKey=game:GetService("UserInputService")
 local draggingKey=false; local dragStartKey; local startPosKey; local dragInputKey
 keyFrame.InputBegan:Connect(function(i)
@@ -269,7 +263,6 @@ UISKey.InputEnded:Connect(function(i)
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then draggingKey=false end
 end)
 
--- O código do painel só continua depois da validação.
 while keyGui.Parent and not unlocked do task.wait(.1) end
 if not unlocked then return end
 
@@ -277,31 +270,15 @@ if not unlocked then return end
 -- FIM DO KEY SYSTEM / INÍCIO DO PAINEL ORIGINAL
 --============================================================
 
---============================================================
--- SAVANA MINI MENU V2
--- ESP + AUTO FARM
---
--- ESP:
--- Nome | Animal | HP | Distância
--- Texto muda conforme HP
--- Highlight muda conforme HP
--- Tracer muda conforme HP
---
--- VIDA:
--- 100% = VERDE
--- 50%  = AMARELO
--- 0%   = VERMELHO
---
--- FARM:
--- WATER -> 100% -> HOME
--- GRASS -> caça várias -> 100% -> HOME
---============================================================
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
+local CoreGui = game:GetService("CoreGui")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local UIS = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
 
 local LP = Players.LocalPlayer
 local PlayerGui = LP:WaitForChild("PlayerGui")
@@ -312,38 +289,13 @@ local PlayerGui = LP:WaitForChild("PlayerGui")
 
 local FLY_SPEED = 55
 local UNDERGROUND_Y = 10
-
 local FULL_VALUE = 99.5
-
---============================================================
--- WATER
--- NÃO ALTERADO
---============================================================
-
-local WATER_SCAN_DOWN = 100
-local WATER_SCAN_STEP = 1
-local WATER_FINE_SPEED = 6
-
---============================================================
--- GRASS
---============================================================
-
-local SEARCH_RADIUS = 1200
-local SEARCH_STEP = 15
-local ANGLE_STEP = 15
-local SCAN_HEIGHT = 120
-
-local GRASS_WAIT_EAT = 5
-local GRASS_STOP_TIMEOUT = 2
-local GRASS_IGNORE_DISTANCE = 12
-local GRASS_MAX_ATTEMPTS = 50
 
 --============================================================
 -- ESP
 --============================================================
 
 local ESP_DISTANCE = 500
-
 local ESPEnabled = false
 local ShowTracer = false
 local ShowHighlight = false
@@ -354,126 +306,61 @@ local carcassESPObjects = {}
 
 local killAuraEnabled, lastAttack = false, 0
 local enableUnderground, disableUnderground
-
 local espObjects = {}
-
---============================================================
--- FARM
---============================================================
-
-local running = false
-
-local holdPosition = false
-local holdCF = nil
-
-local homeCF = nil
-
-local actionToken = 0
-
-local estado = "PRONTO"
-local canStartText = "nil"
 
 --============================================================
 -- CHARACTER
 --============================================================
 
 local function getChar()
-
-	return LP.Character
-		or LP.CharacterAdded:Wait()
-
+	return LP.Character or LP.CharacterAdded:Wait()
 end
 
 local function getRoot()
+	return getChar():WaitForChild("HumanoidRootPart")
+end
 
-	return getChar():WaitForChild(
-		"HumanoidRootPart"
+--============================================================
+-- UTILS (SEGURO COM PCALL)
+--============================================================
+
+local Utils = nil
+pcall(function()
+	Utils = require(
+		ReplicatedStorage
+			:WaitForChild("AnimalGameFrameworkShared")
+			:WaitForChild("Utils")
 	)
-
-end
-
---============================================================
--- UTILS
--- CORRIGIDO: antes ficava esperando para sempre se o módulo
--- mudasse de lugar no jogo, e o painel nunca abria.
--- Agora espera no máximo 5s e segue em frente.
---============================================================
-
-local Utils
-do
-	local okUtils = pcall(function()
-		local folder = ReplicatedStorage:WaitForChild("AnimalGameFrameworkShared", 5)
-		local mod = folder and folder:WaitForChild("Utils", 5)
-		Utils = mod and require(mod)
-	end)
-	if not okUtils or not Utils then
-		warn("[SATOSHI] Utils nao encontrado - o jogo provavelmente atualizou. Auto Farm e Subsolo podem nao funcionar.")
-	end
-end
+end)
 
 --============================================================
 -- CAN START
 --============================================================
 
+local canStartText = "nil"
 local function canStart()
-
 	local ok, result = pcall(function()
-
-		return Utils.CanEatDrink.CanStart(
-			getChar()
-		)
-
+		if Utils and Utils.CanEatDrink and Utils.CanEatDrink.CanStart then
+			return Utils.CanEatDrink.CanStart(getChar())
+		end
+		return "Drink"
 	end)
 
 	if not ok then
-
 		canStartText = "ERRO"
-
 		return nil
-
 	end
 
 	canStartText = tostring(result)
-
 	return result
-
 end
 
 --============================================================
--- CHANGE STATE
+-- INTERFACE SAVANA HUB
 --============================================================
-
-local function changeState(state)
-
-	local char = getChar()
-
-	local event =
-		char:FindFirstChild(
-			"ChangeStateBindableEvent"
-		)
-
-	if not event then
-
-		estado = "SEM ChangeState"
-
-		return false
-
-	end
-
-	event:Fire(state)
-
-	return true
-
-end
-
---============================================================
--- NOVO PAINEL SAVANA HUB - PC + MOBILE
---============================================================
-local UIS = game:GetService("UserInputService")
-local CollectionService = game:GetService("CollectionService")
 
 for _,name in ipairs({"SAVANA_MINI_MENU","SAVANA_MINI_MENU_V2","SAVANA_HUB_FINAL","SavanaSpeedTest"}) do
-    local old=PlayerGui:FindFirstChild(name) or game:GetService("CoreGui"):FindFirstChild(name)
+    local old=PlayerGui:FindFirstChild(name) or CoreGui:FindFirstChild(name)
     if old then old:Destroy() end
 end
 
@@ -533,6 +420,7 @@ local function card(parent,title,desc,height)
     if desc then local d=Instance.new("TextLabel",f); d.Position=UDim2.fromOffset(14,33); d.Size=UDim2.new(.68,-10,0,25); d.BackgroundTransparency=1; d.Text=desc; d.TextColor3=MUTED; d.TextXAlignment=Enum.TextXAlignment.Left; d.TextWrapped=true; d.Font=Enum.Font.Gotham; d.TextSize=10 end
     return f
 end
+
 local function toggle(parent,title,desc,initial,callback)
     local f=card(parent,title,desc,70); local state=initial or false
     local b=Instance.new("TextButton",f); b.AnchorPoint=Vector2.new(1,.5); b.Position=UDim2.new(1,-15,.5,0); b.Size=UDim2.fromOffset(48,25); b.BackgroundColor3=state and ACCENT or Color3.fromRGB(55,52,65); b.Text=""; b.BorderSizePixel=0; Instance.new("UICorner",b).CornerRadius=UDim.new(1,0)
@@ -541,99 +429,28 @@ local function toggle(parent,title,desc,initial,callback)
     b.MouseButton1Click:Connect(function() set(not state) end)
     return f,set,function() return state end
 end
-local function slider(parent,title,minv,maxv,initial,callback)
-    local f=card(parent,title,nil,78); local val=initial or minv
-    local txt=Instance.new("TextLabel",f); txt.AnchorPoint=Vector2.new(1,0); txt.Position=UDim2.new(1,-15,0,10); txt.Size=UDim2.fromOffset(70,20); txt.BackgroundTransparency=1; txt.Text=tostring(val); txt.TextColor3=Color3.fromRGB(211,201,255); txt.TextXAlignment=Enum.TextXAlignment.Right; txt.Font=Enum.Font.GothamBold; txt.TextSize=12
-    local bar=Instance.new("Frame",f); bar.Position=UDim2.new(0,14,0,50); bar.Size=UDim2.new(1,-28,0,7); bar.BackgroundColor3=Color3.fromRGB(55,52,65); bar.BorderSizePixel=0; Instance.new("UICorner",bar).CornerRadius=UDim.new(1,0)
+
+local function toggleSlider(parent,title,desc,initial,minv,maxv,sliderInitial,toggleCallback,sliderCallback)
+    local f=card(parent,title,desc,112)
+    local state=initial or false
+    local b=Instance.new("TextButton",f); b.AnchorPoint=Vector2.new(1,0); b.Position=UDim2.new(1,-15,0,13); b.Size=UDim2.fromOffset(48,25); b.BackgroundColor3=state and ACCENT or Color3.fromRGB(55,52,65); b.Text=""; b.BorderSizePixel=0; Instance.new("UICorner",b).CornerRadius=UDim.new(1,0)
+    local dot=Instance.new("Frame",b); dot.AnchorPoint=Vector2.new(.5,.5); dot.Position=state and UDim2.fromScale(.74,.5) or UDim2.fromScale(.26,.5); dot.Size=UDim2.fromOffset(19,19); dot.BackgroundColor3=Color3.new(1,1,1); dot.BorderSizePixel=0; Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
+    local function setToggle(v) state=v; b.BackgroundColor3=v and ACCENT or Color3.fromRGB(55,52,65); dot.Position=v and UDim2.fromScale(.74,.5) or UDim2.fromScale(.26,.5); if toggleCallback then toggleCallback(v) end end
+    b.MouseButton1Click:Connect(function() setToggle(not state) end)
+    local val=sliderInitial or minv
+    local txt=Instance.new("TextLabel",f); txt.AnchorPoint=Vector2.new(1,0); txt.Position=UDim2.new(1,-15,0,67); txt.Size=UDim2.fromOffset(60,18); txt.BackgroundTransparency=1; txt.Text=tostring(val); txt.TextColor3=Color3.fromRGB(211,201,255); txt.TextXAlignment=Enum.TextXAlignment.Right; txt.Font=Enum.Font.GothamBold; txt.TextSize=11
+    local bar=Instance.new("Frame",f); bar.Position=UDim2.new(0,14,0,94); bar.Size=UDim2.new(1,-28,0,6); bar.BackgroundColor3=Color3.fromRGB(55,52,65); bar.BorderSizePixel=0; Instance.new("UICorner",bar).CornerRadius=UDim.new(1,0)
     local fill=Instance.new("Frame",bar); fill.BackgroundColor3=ACCENT; fill.BorderSizePixel=0; Instance.new("UICorner",fill).CornerRadius=UDim.new(1,0)
-    local knob=Instance.new("Frame",bar); knob.AnchorPoint=Vector2.new(.5,.5); knob.Size=UDim2.fromOffset(16,16); knob.BackgroundColor3=Color3.new(1,1,1); knob.BorderSizePixel=0; Instance.new("UICorner",knob).CornerRadius=UDim.new(1,0)
+    local knob=Instance.new("Frame",bar); knob.AnchorPoint=Vector2.new(.5,.5); knob.Size=UDim2.fromOffset(15,15); knob.BackgroundColor3=Color3.new(1,1,1); knob.BorderSizePixel=0; Instance.new("UICorner",knob).CornerRadius=UDim.new(1,0)
     local dragging=false
-    local function setFromPercent(p) p=math.clamp(p,0,1); val=math.floor(minv+(maxv-minv)*p+.5); fill.Size=UDim2.fromScale(p,1); knob.Position=UDim2.fromScale(p,.5); txt.Text=tostring(val); if callback then callback(val) end end
-    local function setX(x) if bar.AbsoluteSize.X>0 then setFromPercent((x-bar.AbsolutePosition.X)/bar.AbsoluteSize.X) end end
+    local function setPercent(p) p=math.clamp(p,0,1); val=math.floor(minv+(maxv-minv)*p+.5); fill.Size=UDim2.fromScale(p,1); knob.Position=UDim2.fromScale(p,.5); txt.Text=tostring(val); if sliderCallback then sliderCallback(val) end end
+    local function setX(x) if bar.AbsoluteSize.X>0 then setPercent((x-bar.AbsolutePosition.X)/bar.AbsoluteSize.X) end end
     bar.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true;setX(i.Position.X) end end)
     knob.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true end end)
     UIS.InputChanged:Connect(function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then setX(i.Position.X) end end)
     UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=false end end)
-    task.defer(function() setFromPercent((val-minv)/(maxv-minv)) end)
-    return f,function() return val end
-end
-local function toggleSlider(parent,title,desc,initial,minv,maxv,sliderInitial,toggleCallback,sliderCallback)
-    local f=card(parent,title,desc,112)
-    local state=initial or false
-
-    local b=Instance.new("TextButton",f)
-    b.AnchorPoint=Vector2.new(1,0)
-    b.Position=UDim2.new(1,-15,0,13)
-    b.Size=UDim2.fromOffset(48,25)
-    b.BackgroundColor3=state and ACCENT or Color3.fromRGB(55,52,65)
-    b.Text=""; b.BorderSizePixel=0
-    Instance.new("UICorner",b).CornerRadius=UDim.new(1,0)
-
-    local dot=Instance.new("Frame",b)
-    dot.AnchorPoint=Vector2.new(.5,.5)
-    dot.Position=state and UDim2.fromScale(.74,.5) or UDim2.fromScale(.26,.5)
-    dot.Size=UDim2.fromOffset(19,19)
-    dot.BackgroundColor3=Color3.new(1,1,1); dot.BorderSizePixel=0
-    Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
-
-    local function setToggle(v)
-        state=v
-        b.BackgroundColor3=v and ACCENT or Color3.fromRGB(55,52,65)
-        dot.Position=v and UDim2.fromScale(.74,.5) or UDim2.fromScale(.26,.5)
-        if toggleCallback then toggleCallback(v) end
-    end
-    b.MouseButton1Click:Connect(function() setToggle(not state) end)
-
-    local val=sliderInitial or minv
-    local label=Instance.new("TextLabel",f)
-    label.Position=UDim2.new(0,14,0,67); label.Size=UDim2.new(.6,0,0,18)
-    label.BackgroundTransparency=1; label.Text="Alcance"; label.TextColor3=MUTED
-    label.TextXAlignment=Enum.TextXAlignment.Left; label.Font=Enum.Font.Gotham; label.TextSize=10
-
-    local txt=Instance.new("TextLabel",f)
-    txt.AnchorPoint=Vector2.new(1,0); txt.Position=UDim2.new(1,-15,0,67); txt.Size=UDim2.fromOffset(60,18)
-    txt.BackgroundTransparency=1; txt.Text=tostring(val); txt.TextColor3=Color3.fromRGB(211,201,255)
-    txt.TextXAlignment=Enum.TextXAlignment.Right; txt.Font=Enum.Font.GothamBold; txt.TextSize=11
-
-    local bar=Instance.new("Frame",f)
-    bar.Position=UDim2.new(0,14,0,94); bar.Size=UDim2.new(1,-28,0,6)
-    bar.BackgroundColor3=Color3.fromRGB(55,52,65); bar.BorderSizePixel=0
-    Instance.new("UICorner",bar).CornerRadius=UDim.new(1,0)
-
-    local fill=Instance.new("Frame",bar); fill.BackgroundColor3=ACCENT; fill.BorderSizePixel=0
-    Instance.new("UICorner",fill).CornerRadius=UDim.new(1,0)
-    local knob=Instance.new("Frame",bar); knob.AnchorPoint=Vector2.new(.5,.5); knob.Size=UDim2.fromOffset(15,15)
-    knob.BackgroundColor3=Color3.new(1,1,1); knob.BorderSizePixel=0
-    Instance.new("UICorner",knob).CornerRadius=UDim.new(1,0)
-
-    local dragging=false
-    local function setPercent(p)
-        p=math.clamp(p,0,1)
-        val=math.floor(minv+(maxv-minv)*p+.5)
-        fill.Size=UDim2.fromScale(p,1); knob.Position=UDim2.fromScale(p,.5); txt.Text=tostring(val)
-        if sliderCallback then sliderCallback(val) end
-    end
-    local function setX(x)
-        if bar.AbsoluteSize.X>0 then setPercent((x-bar.AbsolutePosition.X)/bar.AbsoluteSize.X) end
-    end
-    bar.InputBegan:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true;setX(i.Position.X) end
-    end)
-    knob.InputBegan:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true end
-    end)
-    UIS.InputChanged:Connect(function(i)
-        if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then setX(i.Position.X) end
-    end)
-    UIS.InputEnded:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=false end
-    end)
     task.defer(function() setPercent((val-minv)/(maxv-minv)) end)
-    local function setValue(v)
-        v=math.clamp(tonumber(v) or minv,minv,maxv)
-        setPercent((v-minv)/(maxv-minv))
-    end
-    return f,setToggle,function() return state end,setValue,function() return val end
+    return f,setToggle,function() return state end,function(v) setPercent((v-minv)/(maxv-minv)) end,function() return val end
 end
 
 local function action(parent,text,callback)
@@ -642,20 +459,14 @@ end
 
 --============================================================
 -- WHITELIST DE PLAYERS
--- As rotinas do SATOSHI ignoram os UserIds marcados aqui.
 --============================================================
 SatoshiWhitelist=SatoshiWhitelist or {}
-SatoshiWhitelistConnections=SatoshiWhitelistConnections or {}
-
 function SatoshiIsWhitelisted(model)
     if not model then return false end
     local player=Players:GetPlayerFromCharacter(model)
     if not player then
         for _,p in ipairs(Players:GetPlayers()) do
-            if p.Character and (model==p.Character or model:IsDescendantOf(p.Character)) then
-                player=p
-                break
-            end
+            if p.Character and (model==p.Character or model:IsDescendantOf(p.Character)) then player=p; break end
         end
     end
     return player~=nil and SatoshiWhitelist[player.UserId]==true
@@ -666,80 +477,42 @@ function SatoshiRefreshWhitelist()
     for _,obj in ipairs(pages.Whitelist:GetChildren()) do
         if obj:GetAttribute("SatoshiWhitelistRow") then obj:Destroy() end
     end
-
     for _,player in ipairs(Players:GetPlayers()) do
         if player~=LP then
             local row=Instance.new("TextButton",pages.Whitelist)
             row:SetAttribute("SatoshiWhitelistRow",true)
             row.Size=UDim2.new(1,-8,0,58)
             row.BackgroundColor3=SatoshiWhitelist[player.UserId] and Color3.fromRGB(36,100,67) or CARD
-            row.BorderSizePixel=0
-            row.TextColor3=Color3.new(1,1,1)
-            row.Font=Enum.Font.GothamSemibold
-            row.TextSize=12
-            row.TextWrapped=true
+            row.BorderSizePixel=0; row.TextColor3=Color3.new(1,1,1); row.Font=Enum.Font.GothamSemibold; row.TextSize=12; row.TextWrapped=true
             row.Text=(SatoshiWhitelist[player.UserId] and "✓ PROTEGIDO  " or "○ LIVRE  ")..player.DisplayName.."  @"..player.Name
             Instance.new("UICorner",row).CornerRadius=UDim.new(0,10)
             local strokeWL=Instance.new("UIStroke",row)
-            strokeWL.Color=SatoshiWhitelist[player.UserId] and Color3.fromRGB(80,205,125) or Color3.fromRGB(55,49,72)
-            strokeWL.Transparency=.35
-
+            strokeWL.Color=SatoshiWhitelist[player.UserId] and Color3.fromRGB(80,205,125) or Color3.fromRGB(55,49,72); strokeWL.Transparency=.35
             row.MouseButton1Click:Connect(function()
-                if SatoshiWhitelist[player.UserId] then
-                    SatoshiWhitelist[player.UserId]=nil
-                else
-                    SatoshiWhitelist[player.UserId]=true
-                end
+                SatoshiWhitelist[player.UserId] = not SatoshiWhitelist[player.UserId]
                 SatoshiRefreshWhitelist()
             end)
         end
     end
 end
-
-Players.PlayerAdded:Connect(function()
-    task.defer(SatoshiRefreshWhitelist)
-end)
-Players.PlayerRemoving:Connect(function(player)
-    SatoshiWhitelist[player.UserId]=nil
-    task.defer(SatoshiRefreshWhitelist)
-end)
 task.defer(SatoshiRefreshWhitelist)
 
-SatoshiBinds={Aura=nil,Hitbox=nil,Speed=nil,Subsolo=nil,BeberAgua=nil}
-SatoshiBindWaiting=nil
-SatoshiBindActions={}
-SatoshiBindButtons={}
+SatoshiBinds={Aura=nil,Hitbox=nil,Speed=nil,Subsolo=nil,BeberAgua=nil,AtaqueNormal=nil,AtaqueEspecial=nil,FarmUnificado=nil,ApenasSede=nil}
+SatoshiBindWaiting=nil; SatoshiBindActions={}; SatoshiBindButtons={}
 
 function SatoshiAddBind(frame,name,action)
     SatoshiBindActions[name]=action
     local b=Instance.new("TextButton",frame)
     SatoshiBindButtons[name]=b
-    b.AnchorPoint=Vector2.new(1,0)
-    b.Position=UDim2.new(1,-70,0,42)
-    b.Size=UDim2.fromOffset(58,22)
-    b.BackgroundColor3=Color3.fromRGB(45,41,58)
-    b.Text="BIND"
-    b.TextColor3=Color3.fromRGB(225,223,235)
-    b.Font=Enum.Font.GothamBold
-    b.TextSize=9
-    b.BorderSizePixel=0
+    b.AnchorPoint=Vector2.new(1,0); b.Position=UDim2.new(1,-70,0,42); b.Size=UDim2.fromOffset(58,22)
+    b.BackgroundColor3=Color3.fromRGB(45,41,58); b.Text="BIND"; b.TextColor3=Color3.fromRGB(225,223,235); b.Font=Enum.Font.GothamBold; b.TextSize=9; b.BorderSizePixel=0
     Instance.new("UICorner",b).CornerRadius=UDim.new(0,6)
-    b.MouseButton1Click:Connect(function()
-        SatoshiBindWaiting={name=name,button=b}
-        b.Text="APERTE..."
-    end)
+    b.MouseButton1Click:Connect(function() SatoshiBindWaiting={name=name,button=b}; b.Text="APERTE..." end)
     return b
 end
 
-function SatoshiIsBindInput(input)
-    if input.UserInputType==Enum.UserInputType.Keyboard then return true end
-    local n=input.UserInputType.Name
-    return n=="Gamepad1" or n=="Gamepad2" or n=="Gamepad3" or n=="Gamepad4"
-        or n=="Gamepad5" or n=="Gamepad6" or n=="Gamepad7" or n=="Gamepad8"
-end
-
 UIS.InputBegan:Connect(function(input,processed)
-    if not SatoshiIsBindInput(input) or input.KeyCode==Enum.KeyCode.Unknown then return end
+    if input.KeyCode==Enum.KeyCode.Unknown then return end
     if SatoshiBindWaiting then
         local w=SatoshiBindWaiting
         SatoshiBinds[w.name]=input.KeyCode
@@ -757,19 +530,14 @@ UIS.InputBegan:Connect(function(input,processed)
 end)
 
 local hitboxEnabled=false; local hitboxRange=50
-specialHitboxEnabled=false; specialHitboxRange=30
+local specialHitboxEnabled=false; local specialHitboxRange=30
 local autoGrabEnabled=false; local autoGrabRange=50
 local autoDesgrabEnabled=false
-local speedValue=16
-local speedEnabled=false
-local infiniteStats=false
-local sempreDiaEnabled=false
+local speedValue=16; local speedEnabled=false
+local infiniteStats=false; local sempreDiaEnabled=false
 
--- SATOSHI FLY - velocidade estável 16
-local flyEnabled=false
-local flyConnection=nil
-local flyAttachment=nil
-local flyVelocity=nil
+-- SATOSHI FLY
+local flyEnabled=false; local flyConnection=nil; local flyAttachment=nil; local flyVelocity=nil
 SatoshiFlyCollision={}
 
 function SatoshiSetNoclip(on)
@@ -801,10 +569,7 @@ function stopFly()
         local hum=char:FindFirstChildOfClass("Humanoid")
         local root=char:FindFirstChild("HumanoidRootPart")
         if hum then hum.AutoRotate=true end
-        if root then
-            root.AssemblyLinearVelocity=Vector3.zero
-            root.AssemblyAngularVelocity=Vector3.zero
-        end
+        if root then root.AssemblyLinearVelocity=Vector3.zero; root.AssemblyAngularVelocity=Vector3.zero end
     end
 end
 
@@ -815,44 +580,22 @@ function startFly()
     local hum=char:FindFirstChildOfClass("Humanoid")
     local root=char:FindFirstChild("HumanoidRootPart")
     if not hum or not root then return end
-
-    flyEnabled=true
-    hum.AutoRotate=false
-    SatoshiSetNoclip(true)
-
-    flyAttachment=Instance.new("Attachment")
-    flyAttachment.Name="SatoshiFlyAttachment"
-    flyAttachment.Parent=root
-
-    flyVelocity=Instance.new("LinearVelocity")
-    flyVelocity.Name="SatoshiFlyVelocity"
-    flyVelocity.Attachment0=flyAttachment
-    flyVelocity.RelativeTo=Enum.ActuatorRelativeTo.World
-    flyVelocity.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector
-    flyVelocity.MaxForce=math.huge
-    flyVelocity.VectorVelocity=Vector3.zero
-    flyVelocity.Parent=root
-
+    flyEnabled=true; hum.AutoRotate=false; SatoshiSetNoclip(true)
+    flyAttachment=Instance.new("Attachment",root); flyAttachment.Name="SatoshiFlyAttachment"
+    flyVelocity=Instance.new("LinearVelocity",root); flyVelocity.Name="SatoshiFlyVelocity"
+    flyVelocity.Attachment0=flyAttachment; flyVelocity.RelativeTo=Enum.ActuatorRelativeTo.World
+    flyVelocity.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector; flyVelocity.MaxForce=math.huge; flyVelocity.VectorVelocity=Vector3.zero
     flyConnection=RunService.RenderStepped:Connect(function()
         if not flyEnabled or not root.Parent then stopFly(); return end
         SatoshiSetNoclip(true)
         local camera=Workspace.CurrentCamera
         if not camera then return end
         local move=hum.MoveDirection
-        if move.Magnitude < 0.05 then
-            flyVelocity.VectorVelocity=Vector3.zero
-            root.AssemblyAngularVelocity=Vector3.zero
-            return
-        end
-        local look=camera.CFrame.LookVector
-        local right=camera.CFrame.RightVector
-        local flatLook=Vector3.new(look.X,0,look.Z)
-        if flatLook.Magnitude>0.001 then flatLook=flatLook.Unit else flatLook=Vector3.new(0,0,-1) end
-        local flatRight=Vector3.new(right.X,0,right.Z)
-        if flatRight.Magnitude>0.001 then flatRight=flatRight.Unit else flatRight=Vector3.new(1,0,0) end
-        local forwardAmount=move:Dot(flatLook)
-        local rightAmount=move:Dot(flatRight)
-        local direction=(look*forwardAmount)+(right*rightAmount)
+        if move.Magnitude < 0.05 then flyVelocity.VectorVelocity=Vector3.zero; root.AssemblyAngularVelocity=Vector3.zero; return end
+        local look=camera.CFrame.LookVector; local right=camera.CFrame.RightVector
+        local flatLook=Vector3.new(look.X,0,look.Z).Unit
+        local flatRight=Vector3.new(right.X,0,right.Z).Unit
+        local direction=(flatLook*move.Dot(flatLook))+(flatRight*move.Dot(flatRight))
         if direction.Magnitude>1 then direction=direction.Unit end
         flyVelocity.VectorVelocity=direction*16
         root.AssemblyAngularVelocity=Vector3.zero
@@ -865,2341 +608,467 @@ _,setTracer,getTracerState=toggle(pages.Visual,"Linha Rastreadora","Linha até o
 _,setHighlight,getHighlightState=toggle(pages.Visual,"Contorno","Destaca o personagem conforme a vida.",false,function(v) ShowHighlight=v end)
 _,setSempreDia,getSempreDiaState=toggle(pages.Visual,"Sempre Dia","Trava o relógio visual em 12:00.",false,function(v) sempreDiaEnabled=v end)
 
-killAuraButton=Instance.new("TextButton") -- compatibilidade com a lógica existente
-
--- Kill Aura e Hitbox nunca ficam ativos juntos.
--- Se o Hitbox estava ligado antes da Aura, ele volta quando a Aura for desligada.
-local setHitbox
-hitboxWasEnabledBeforeAura=false
-
-auraFrame,setKill,getKillState=toggle(pages.Combat,"Aura de Ataque","Ataca 1 alvo por vez, priorizando o mais próximo em até 50 studs.",false,function(v)
-    killAuraEnabled=v
-    lastAttack=0
-
-    if v then
-        hitboxWasEnabledBeforeAura=hitboxEnabled
-        if hitboxEnabled and setHitbox then
-            setHitbox(false)
-        end
-    else
-        if hitboxWasEnabledBeforeAura and setHitbox then
-            setHitbox(true)
-        end
-        hitboxWasEnabledBeforeAura=false
-    end
-end)
-
-local hitboxFrame
+killAuraButton=Instance.new("TextButton")
+auraFrame,setKill,getKillState=toggle(pages.Combat,"Aura de Ataque","Ataca 1 alvo por vez, priorizando o mais próximo em até 50 studs.",false,function(v) killAuraEnabled=v; lastAttack=0 end)
 hitboxFrame,setHitbox,getHitboxState,setHitboxValue,getHitboxValue=toggleSlider(pages.Combat,"Hitbox","Amplia o alcance do ataque manual.",false,0,60,50,function(v) hitboxEnabled=v end,function(v) hitboxRange=v end)
 SatoshiAddBind(auraFrame,"Aura",function() setKill(not getKillState()) end)
 SatoshiAddBind(hitboxFrame,"Hitbox",function() setHitbox(not getHitboxState()) end)
 
-_,setSpecialHitbox,getSpecialHitboxState,setSpecialHitboxValue,getSpecialHitboxValue=toggleSlider(pages.Combat,"Hitbox Grab / Pounce","Amplia o alcance do ataque especial de agarrar (F / botão Special).",false,0,60,30,function(v) specialHitboxEnabled=v end,function(v) specialHitboxRange=v end)
-
-_,setGrab,getGrabState,setGrabValue,getGrabValue=toggleSlider(pages.Combat,"Agarrar Automático","Tenta agarrar o alvo válido mais próximo.",false,0,50,50,function(v) autoGrabEnabled=v end,function(v) autoGrabRange=v end)
+_,setSpecialHitbox,getSpecialHitboxState,setSpecialHitboxValue,getSpecialHitboxValue=toggleSlider(pages.Combat,"Hitbox Grab / Pounce","Amplia o alcance do ataque especial de agarrar.",false,0,60,30,function(v) specialHitboxEnabled=v end,function(v) specialHitboxRange=v end)
+_,setGrab,getGrabState,setGrabValue,getGrabValue=toggleSlider(pages.Combat,"Auto Grab (30 Studs Acima)","Fica a 30 studs acima do inimigo acompanhando onde ele for.",false,0,150,50,function(v) autoGrabEnabled=v end,function(v) autoGrabRange=v end)
 _,setDesgrab,getDesgrabState=toggle(pages.Combat,"Desagarrar Automático","Executa automaticamente o minigame para se soltar.",false,function(v) autoDesgrabEnabled=v end)
 
-speedFrame,setSpeed,getSpeedState,setSpeedValue,getSpeedValue=toggleSlider(pages.Move,"Velocidade","ON/OFF + velocidade + tecla configurável (PC).",false,0,100,16,function(v) speedEnabled=v end,function(v) speedValue=v end)
+speedFrame,setSpeed,getSpeedState,setSpeedValue,getSpeedValue=toggleSlider(pages.Move,"Velocidade","ON/OFF + velocidade + tecla configurável.",false,0,100,16,function(v) speedEnabled=v end,function(v) speedValue=v end)
 SatoshiAddBind(speedFrame,"Speed",function() setSpeed(not getSpeedState()) end)
 _,setInf,getInfState=toggle(pages.Move,"Stamina + Oxigênio Infinitos","Mantém stamina e oxigênio em 100.",false,function(v) infiniteStats=v end)
-_,setFly,getFlyState=toggle(pages.Move,"Fly","Voa seguindo a câmera e o analógico/WASD. Velocidade: 16.",false,function(v)
-    if v then startFly() else stopFly() end
-end)
-undergroundButton=Instance.new("TextButton") -- compatibilidade
-undergroundFrame,setUnder,getUnderState=toggle(pages.Move,"Subsolo","Ativa o modo invisível/subsolo do script-base.",false,function(v) if v then enableUnderground() else disableUnderground() end end)
+_,setFly,getFlyState=toggle(pages.Move,"Fly","Voa seguindo a câmera e o analógico/WASD.",false,function(v) if v then startFly() else stopFly() end end)
+undergroundButton=Instance.new("TextButton")
+undergroundFrame,setUnder,getUnderState=toggle(pages.Move,"Subsolo","Ativa o modo invisível/subsolo.",false,function(v) if v then enableUnderground() else disableUnderground() end end)
 SatoshiAddBind(undergroundFrame,"Subsolo",function() setUnder(not getUnderState()) end)
 
+--============================================================
+-- LOGICAS DE AUTO FARM (BEBER E COMER)
+--============================================================
+local ALTURA_OFFSET = 1.8
+local META_AGUA = 99.5
+local LIMIAR_SEDE = 70.0
 
-SatoshiAntiBugEnabled=false
-SatoshiAntiBugConnection=nil
-SatoshiAntiBugAttachment=nil
-SatoshiAntiBugVelocity=nil
+local META_COMIDA = 99.5
+local LIMIAR_FOME = 75.0
+local TEMPO_COMENDO_AREA = 8
 
-function SatoshiStopAntiBug()
-    SatoshiAntiBugEnabled=false
-    if SatoshiAntiBugConnection then
-        SatoshiAntiBugConnection:Disconnect()
-        SatoshiAntiBugConnection=nil
+local autoFarmUnificadoAtivo = false
+local apenasSedeAtivo = false
+local farmEmExecucao = false
+
+local function obterAlturaAtualAgua(hrpPosition)
+    local mainWater = Workspace:FindFirstChild("MainWaterPart")
+    local rayOrigin = Vector3.new(hrpPosition.X, hrpPosition.Y + 200, hrpPosition.Z)
+    local rayDirection = Vector3.new(0, -600, 0)
+    local params = RaycastParams.new()
+    params.IgnoreWater = false
+    if mainWater then
+        params.FilterType = Enum.RaycastFilterType.Include
+        params.FilterDescendantsInstances = {mainWater}
     end
-    if SatoshiAntiBugVelocity then
-        SatoshiAntiBugVelocity:Destroy()
-        SatoshiAntiBugVelocity=nil
-    end
-    if SatoshiAntiBugAttachment then
-        SatoshiAntiBugAttachment:Destroy()
-        SatoshiAntiBugAttachment=nil
-    end
-
-    local char=LP.Character
-    local root=char and char:FindFirstChild("HumanoidRootPart")
-    if root then
-        root.AssemblyLinearVelocity=Vector3.zero
-        root.AssemblyAngularVelocity=Vector3.zero
-    end
-    SatoshiSetNoclip(false)
-    estado="ANTIBUG OFF"
+    local result = Workspace:Raycast(rayOrigin, rayDirection, params)
+    if result then return result.Position.Y
+    elseif mainWater then return mainWater.Position.Y + (mainWater.Size.Y / 2) end
+    return nil
 end
 
-function SatoshiStartAntiBug()
-    if SatoshiAntiBugEnabled then return end
-
-    -- Solta qualquer estado que possa estar prendendo o animal embaixo.
-    actionToken += 1
-    running=false
-    holdPosition=false
-    holdCF=nil
-    pcall(function() changeState("ExitDrinking") end)
-    pcall(function() changeState("ExitEating") end)
-    if setBeberAgua then
-        pcall(function() setBeberAgua(false) end)
-    end
-
-    local char=LP.Character
-    local root=char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    SatoshiAntiBugEnabled=true
-    SatoshiSetNoclip(true)
-
-    SatoshiAntiBugAttachment=Instance.new("Attachment")
-    SatoshiAntiBugAttachment.Name="SatoshiAntiBugAttachment"
-    SatoshiAntiBugAttachment.Parent=root
-
-    SatoshiAntiBugVelocity=Instance.new("LinearVelocity")
-    SatoshiAntiBugVelocity.Name="SatoshiAntiBugVelocity"
-    SatoshiAntiBugVelocity.Attachment0=SatoshiAntiBugAttachment
-    SatoshiAntiBugVelocity.RelativeTo=Enum.ActuatorRelativeTo.World
-    SatoshiAntiBugVelocity.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector
-    SatoshiAntiBugVelocity.MaxForce=math.huge
-    SatoshiAntiBugVelocity.VectorVelocity=Vector3.new(0,16,0)
-    SatoshiAntiBugVelocity.Parent=root
-
-    SatoshiAntiBugConnection=RunService.RenderStepped:Connect(function()
-        if not SatoshiAntiBugEnabled or not root.Parent then
-            SatoshiStopAntiBug()
-            return
-        end
-        SatoshiSetNoclip(true)
-        SatoshiAntiBugVelocity.VectorVelocity=Vector3.new(0,16,0)
-        root.AssemblyAngularVelocity=Vector3.zero
-    end)
-
-    estado="ANTIBUG ON • SUBINDO"
-end
-
-_,setAntiBug=toggle(
-    pages.Move,
-    "🛠 ANTIBUG",
-    "ON: sobe com Fly + Noclip. OFF: solta e volta ao normal.",
-    false,
-    function(v)
-        if v then
-            SatoshiStartAntiBug()
-        else
-            SatoshiStopAntiBug()
-        end
-    end
-)
-
--- AUTO FARM unificado: fome <= 65% / água <= 70%
-autoFarmEnabled = false
-autoFarmBusy = false -- trava: nunca deixa água e comida iniciarem juntas
-_,setAutoFarm,getAutoFarmState=toggle(
-    pages.Farm,
-    "Auto Farm",
-    "Água em 70%: bebe até 100%. Fome em 65%: come até 100%.",
-    false,
-    function(v)
-        autoFarmEnabled = v
-        if not v and running then
-            -- O gerenciador para de iniciar novas rotinas. A rotina atual é
-            -- cancelada pelas mesmas variáveis usadas pelo farm original.
-            actionToken += 1
-            running = false
-            holdPosition = false
-            holdCF = nil
-            pcall(function() changeState("ExitEating") end)
-            pcall(function() changeState("ExitDrinking") end)
-            estado = "AUTO FARM OFF"
-        elseif v then
-            estado = "AUTO FARM ON"
-        end
-    end
-)
-status=Instance.new("TextLabel",pages.Farm); status.Size=UDim2.new(1,-8,0,38); status.BackgroundTransparency=1; status.Text="AUTO FARM OFF"; status.TextColor3=MUTED; status.Font=Enum.Font.GothamMedium; status.TextSize=11
-
--- aliases antigos sem interface; mantêm compatibilidade com o restante do arquivo
-waterButton=Instance.new("TextButton")
-grassButton=Instance.new("TextButton")
-homeButton=Instance.new("TextButton")
-stopButton=Instance.new("TextButton")
-
--- aliases esperados pelo código antigo
-espButton=Instance.new("TextButton"); local tracerButton=Instance.new("TextButton"); local highlightButton=Instance.new("TextButton")
--- os botões antigos ficam sem pai; conexões antigas não aparecem na interface
-
-profile=Instance.new("TextLabel",sidebar); profile.AnchorPoint=Vector2.new(0,1); profile.Position=UDim2.fromScale(.08,.965); profile.Size=UDim2.fromScale(.84,.09); profile.BackgroundTransparency=1; profile.Text=LP.DisplayName.."\n@"..LP.Name; profile.TextColor3=Color3.fromRGB(225,223,235); profile.TextXAlignment=Enum.TextXAlignment.Left; profile.TextYAlignment=Enum.TextYAlignment.Center; profile.Font=Enum.Font.GothamMedium; profile.TextSize=10
-
-bubble=Instance.new("TextButton",gui); bubble.AnchorPoint=Vector2.new(.5,.5); bubble.Position=UDim2.fromScale(.075,.55); bubble.Size=UDim2.fromOffset(52,52); bubble.BackgroundColor3=Color3.fromRGB(25,22,35); bubble.Text="🦁"; bubble.TextScaled=true; bubble.Visible=false; bubble.Active=true; bubble.BorderSizePixel=0; Instance.new("UICorner",bubble).CornerRadius=UDim.new(1,0); local bst=Instance.new("UIStroke",bubble);bst.Color=ACCENT
-menuOpen=true
-function setMenu(v) menuOpen=v; frame.Visible=v; bubble.Visible=not v end
-close.MouseButton1Click:Connect(function() setMenu(false) end)
-UIS.InputBegan:Connect(function(input,gp) if not gp and input.KeyCode==Enum.KeyCode.RightShift then setMenu(not menuOpen) end end)
-function makeDraggable(handle,target,onTap)
- local dragging,moved=false,false; local start,pos,current
- handle.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true;moved=false;start=i.Position;pos=target.Position end end)
- handle.InputChanged:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then current=i end end)
- UIS.InputChanged:Connect(function(i) if dragging and i==current and Workspace.CurrentCamera then local d=i.Position-start;if d.Magnitude>6 then moved=true end;local vp=Workspace.CurrentCamera.ViewportSize;target.Position=UDim2.fromScale(pos.X.Scale+d.X/vp.X,pos.Y.Scale+d.Y/vp.Y) end end)
- UIS.InputEnded:Connect(function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch) then dragging=false;if onTap and not moved then onTap() end end end)
-end
-makeDraggable(header,frame); makeDraggable(bubble,bubble,function() setMenu(true) end); openPage("Visual")
-
---============================================================
--- COR DA VIDA
---
--- 100% = VERDE
--- 50% = AMARELO
--- 0% = VERMELHO
---============================================================
-
-function getHealthColor(hum)
-
-	if not hum then
-		return Color3.new(1, 1, 1)
-	end
-
-	if hum.MaxHealth <= 0 then
-		return Color3.new(1, 1, 1)
-	end
-
-	local percent =
-		math.clamp(
-			hum.Health / hum.MaxHealth,
-			0,
-			1
-		)
-
-	return Color3.new(
-		1 - percent,
-		percent,
-		0
-	)
-
-end
-
---============================================================
--- REMOVER ESP
---============================================================
-
-function removeESP(player)
-
-	local data = espObjects[player]
-
-	if not data then
-		return
-	end
-
-	for _, obj in pairs(data) do
-
-		pcall(function()
-
-			if typeof(obj) == "Instance" then
-
-				obj:Destroy()
-
-			end
-
-		end)
-
-	end
-
-	espObjects[player] = nil
-
-end
-
---============================================================
--- CRIAR ESP
---============================================================
-
-function createESP(player)
-
-	if player == LP then
-		return
-	end
-
-	removeESP(player)
-
-	local char = player.Character
-
-	if not char then
-		return
-	end
-
-	local root = char:FindFirstChild("HumanoidRootPart")
-
-	if not root then
-		return
-	end
-
-	--========================================================
-	-- BILLBOARD
-	--========================================================
-
-	local billboard = Instance.new("BillboardGui")
-
-	billboard.Name = "SAVANA_ESP"
-	billboard.Adornee = root
-	billboard.Size = UDim2.fromOffset(300, 35)
-	billboard.StudsOffset = Vector3.new(0, 4, 0)
-	billboard.AlwaysOnTop = true
-	billboard.Parent = gui
-
-	--========================================================
-	-- TEXTO
-	--========================================================
-
-	local label = Instance.new("TextLabel")
-
-	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 1
-	label.TextColor3 = Color3.new(0, 1, 0)
-	label.TextStrokeTransparency = 0.35
-	label.TextStrokeColor3 = Color3.new(0, 0, 0)
-	label.TextSize = 11
-	label.Font = Enum.Font.GothamBold
-	label.Parent = billboard
-
-	--========================================================
-	-- HIGHLIGHT
-	--========================================================
-
-	local highlight = Instance.new("Highlight")
-
-	highlight.Name = "SAVANA_HIGHLIGHT"
-	highlight.Adornee = char
-	highlight.FillColor = Color3.new(0, 1, 0)
-	highlight.OutlineColor = Color3.new(0, 1, 0)
-	highlight.FillTransparency = 0.82
-	highlight.OutlineTransparency = 0
-	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	highlight.Enabled = ShowHighlight
-	highlight.Parent = gui
-
-	--========================================================
-	-- TRACER
-	--========================================================
-
-	local originPart = Instance.new("Part")
-
-	originPart.Name = "ESP_TRACER_ORIGIN"
-	originPart.Size = Vector3.new(0.05, 0.05, 0.05)
-	originPart.Transparency = 1
-	originPart.Anchored = true
-	originPart.CanCollide = false
-	originPart.CanTouch = false
-	originPart.CanQuery = false
-	originPart.Parent = Workspace
-
-	local originAttachment = Instance.new("Attachment")
-	originAttachment.Parent = originPart
-
-	local targetAttachment = Instance.new("Attachment")
-	targetAttachment.Name = "SAVANA_TRACER_TARGET"
-	targetAttachment.Parent = root
-
-	local beam = Instance.new("Beam")
-
-	beam.Attachment0 = originAttachment
-	beam.Attachment1 = targetAttachment
-	beam.FaceCamera = true
-	beam.Width0 = 0.025
-	beam.Width1 = 0.025
-
-	-- inicialmente verde
-	beam.Color = ColorSequence.new(Color3.new(0, 1, 0))
-	beam.Transparency = NumberSequence.new(0)
-	beam.Enabled = ShowTracer
-	beam.Parent = originPart
-
-	--========================================================
-	-- SALVA
-	--========================================================
-
-	espObjects[player] = {
-
-		Billboard = billboard,
-		Label = label,
-		Highlight = highlight,
-		OriginPart = originPart,
-		TargetAttachment = targetAttachment,
-		Beam = beam
-
-	}
-
-end
-
---============================================================
--- ESP CARCAÇAS MORTAS
---============================================================
-local carcassesFolderConnection
-local carcassesRemovedConnection
-
-function removeCarcassESP(carcass)
-    local data=carcassESPObjects[carcass]
-    if not data then return end
-    if data.Billboard then data.Billboard:Destroy() end
-    if data.Highlight then data.Highlight:Destroy() end
-    carcassESPObjects[carcass]=nil
-end
-
-function createCarcassESP(carcass)
-    if carcassESPObjects[carcass] or not carcass or not carcass:IsA("Model") then return end
-
-    local root=carcass:FindFirstChild("HumanoidRootPart") or carcass.PrimaryPart
-    if not root then
-        root=carcass:WaitForChild("HumanoidRootPart",4)
-    end
-    if not root then return end
-
-    local highlight=Instance.new("Highlight")
-    highlight.Name="SATOSHI_CARCASS_HIGHLIGHT"
-    highlight.Adornee=carcass
-    highlight.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
-    highlight.FillTransparency=.75
-    highlight.OutlineTransparency=0
-    highlight.Enabled=false
-    highlight.Parent=gui
-
-    local billboard=Instance.new("BillboardGui")
-    billboard.Name="SATOSHI_CARCASS_INFO"
-    billboard.Adornee=root
-    billboard.Size=UDim2.fromOffset(180,30)
-    billboard.StudsOffset=Vector3.new(0,3,0)
-    billboard.AlwaysOnTop=true
-    billboard.Enabled=false
-    billboard.Parent=gui
-
-    local label=Instance.new("TextLabel")
-    label.Size=UDim2.fromScale(1,1)
-    label.BackgroundTransparency=1
-    label.Text="☠ CARCAÇA"
-    label.TextColor3=Color3.new(1,1,1)
-    label.TextStrokeTransparency=.25
-    label.Font=Enum.Font.GothamBold
-    label.TextSize=12
-    label.Parent=billboard
-
-    carcassESPObjects[carcass]={
-        Root=root,
-        Billboard=billboard,
-        Label=label,
-        Highlight=highlight
-    }
-end
-
-function connectCarcassesFolder(folder)
-    if carcassesFolderConnection then carcassesFolderConnection:Disconnect() end
-    if carcassesRemovedConnection then carcassesRemovedConnection:Disconnect() end
-
-    for _,carcass in ipairs(folder:GetChildren()) do
-        task.spawn(createCarcassESP,carcass)
-    end
-
-    carcassesFolderConnection=folder.ChildAdded:Connect(function(carcass)
-        task.wait(.1)
-        createCarcassESP(carcass)
-    end)
-
-    carcassesRemovedConnection=folder.ChildRemoved:Connect(removeCarcassESP)
-end
-
-currentCarcassesFolder=Workspace:FindFirstChild("CarcassesStorageModel")
-if currentCarcassesFolder then
-    connectCarcassesFolder(currentCarcassesFolder)
-end
-
-Workspace.ChildAdded:Connect(function(child)
-    if child:IsA("Model") and child.Name=="CarcassesStorageModel" then
-        connectCarcassesFolder(child)
-    end
-end)
-
-RunService.RenderStepped:Connect(function()
-    local char=LP.Character
-    local myRoot=char and char:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return end
-
-    for carcass,data in pairs(carcassESPObjects) do
-        if not carcass.Parent or not data.Root or not data.Root.Parent then
-            removeCarcassESP(carcass)
-        else
-            local distance=(data.Root.Position-myRoot.Position).Magnitude
-            local visible=carcassESPEnabled and CARCASS_ESP_DISTANCE>0 and distance<=CARCASS_ESP_DISTANCE
-
-            data.Billboard.Enabled=visible
-            data.Highlight.Enabled=visible
-
-            if visible then
-                data.Label.Text="☠ CARCAÇA | "..math.floor(distance).."m"
-            end
-        end
-    end
-end)
-
---============================================================
--- ESP LOOP - AUTO REPARO
---============================================================
-function espNeedsRepair(data,char,root)
- if not data then return true end
- if not data.Billboard or not data.Billboard.Parent or data.Billboard.Adornee~=root then return true end
- if not data.Label or not data.Label.Parent then return true end
- if not data.Highlight or not data.Highlight.Parent or data.Highlight.Adornee~=char then return true end
- if not data.OriginPart or not data.OriginPart.Parent then return true end
- if not data.TargetAttachment or not data.TargetAttachment.Parent or data.TargetAttachment.Parent~=root then return true end
- if not data.Beam or not data.Beam.Parent or not data.Beam.Attachment0 or data.Beam.Attachment1~=data.TargetAttachment then return true end
- return false
-end
-
-RunService.RenderStepped:Connect(function()
- local camera=Workspace.CurrentCamera
- local myChar=LP.Character
- local myRoot=myChar and myChar:FindFirstChild("HumanoidRootPart")
- if not myRoot then return end
- for _,player in ipairs(Players:GetPlayers()) do
-  if player~=LP then
-   local char=player.Character
-   local root=char and char:FindFirstChild("HumanoidRootPart")
-   if char and root then
-    local data=espObjects[player]
-    if espNeedsRepair(data,char,root) then
-     createESP(player)
-     data=espObjects[player]
-    end
-    if data then
-     local distance=(root.Position-myRoot.Position).Magnitude
-     local visible=ESPEnabled and ESP_DISTANCE>0 and distance<=ESP_DISTANCE
-     data.Billboard.Enabled=visible
-     data.Highlight.Enabled=visible and ShowHighlight
-     data.Beam.Enabled=visible and ShowTracer
-     local animal=char:GetAttribute("AnimalName") or char:GetAttribute("AnimalClass") or "?"
-     local hum=char:FindFirstChildOfClass("Humanoid")
-     local hp,maxHp=0,0
-     if hum then hp=math.floor(hum.Health);maxHp=math.floor(hum.MaxHealth) end
-     data.Label.Text=player.DisplayName.." | "..tostring(animal).." | ♥ "..tostring(hp).." / "..tostring(maxHp).." | "..math.floor(distance).."m"
-     local healthColor=getHealthColor(hum)
-     data.Label.TextColor3=healthColor
-     data.Beam.Color=ColorSequence.new(healthColor)
-     data.Highlight.FillColor=healthColor
-     data.Highlight.OutlineColor=healthColor
-     if data.OriginPart and data.OriginPart.Parent and camera then
-      data.OriginPart.CFrame=camera.CFrame*CFrame.new(0,-2.5,-1)
-     end
-    end
-   elseif espObjects[player] then
-    removeESP(player)
-   end
-  end
- end
-end)
-
---============================================================
--- PLAYERS
---============================================================
-
-Players.PlayerAdded:Connect(function(player)
-
-	player.CharacterAdded:Connect(function()
-
-		task.wait(1)
-
-		createESP(player)
-
-	end)
-
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-
-	removeESP(player)
-
-end)
-
-for _, player in ipairs(Players:GetPlayers()) do
-
-	if player ~= LP then
-
-		if player.Character then
-
-			createESP(player)
-
-		end
-
-		player.CharacterAdded:Connect(function()
-
-			task.wait(1)
-
-			createESP(player)
-
-		end)
-
-	end
-
-end
-
---============================================================
--- HOLD POSITION
---============================================================
-
-RunService.Heartbeat:Connect(function()
-
-	if not holdPosition then
-		return
-	end
-
-	if not holdCF then
-		return
-	end
-
-	local char = LP.Character
-
-	if not char then
-		return
-	end
-
-	local root = char:FindFirstChild("HumanoidRootPart")
-
-	if not root then
-		return
-	end
-
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-	root.CFrame = holdCF
-
-end)
-
---============================================================
--- FLY
---============================================================
-
-function flyTo(target, speed)
-
-	speed = speed or FLY_SPEED
-
-	while running do
-
-		local root = getRoot()
-
-		local atual = root.Position
-
-		local delta = target - atual
-
-		local distance = delta.Magnitude
-
-		if distance <= 0.25 then
-
-			local rotation = root.CFrame - root.CFrame.Position
-
-			root.CFrame = CFrame.new(target) * rotation
-
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.AssemblyAngularVelocity = Vector3.zero
-
-			return true
-
-		end
-
-		local dt = RunService.Heartbeat:Wait()
-
-		local step = math.min(speed * dt, distance)
-
-		local newPos = atual + delta.Unit * step
-
-		local rotation = root.CFrame - root.CFrame.Position
-
-		root.CFrame = CFrame.new(newPos) * rotation
-
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-
-	end
-
-	return false
-
-end
-
---============================================================
--- DESCER
---============================================================
-
-function descerParaSubsolo()
-
-	local root = getRoot()
-
-	estado = "DESCENDO ↓"
-
-	return flyTo(
-
-		Vector3.new(
-			root.Position.X,
-			UNDERGROUND_Y,
-			root.Position.Z
-		),
-
-		FLY_SPEED
-
-	)
-
-end
-
---============================================================
--- VOLTAR HOME
---============================================================
-
-function voltarAutomatico()
-
-	holdPosition = false
-	holdCF = nil
-
-	if not homeCF then
-
-		running = false
-
-		estado = "SEM HOME"
-
-		return
-
-	end
-
-	running = true
-
-	estado = "VOLTANDO HOME"
-
-	local ok = flyTo(homeCF.Position, FLY_SPEED)
-
-	if ok then
-
-		local root = getRoot()
-
-		root.CFrame = homeCF
-
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-
-	end
-
-	running = false
-
-	estado = "PRONTO"
-
-	canStartText = "nil"
-
-end
-
---============================================================
--- WATER
--- NÃO MEXER
---============================================================
-
-function procurarDrinkVertical()
-
-	local root = getRoot()
-
-	local fixedX = root.Position.X
-	local fixedZ = root.Position.Z
-	local startY = root.Position.Y
-
-	estado = "AJUSTANDO WATER"
-
-	if canStart() == "Drink" then
-
-		holdCF = getRoot().CFrame
-
-		return true
-
-	end
-
-	for amount = 0, WATER_SCAN_DOWN, WATER_SCAN_STEP do
-
-		if not running then
-			return false
-		end
-
-		local targetY = startY - amount
-
-		estado = "WATER Y " .. string.format("%.1f", targetY)
-
-		local target = Vector3.new(fixedX, targetY, fixedZ)
-
-		if not flyTo(target, WATER_FINE_SPEED) then
-
-			return false
-
-		end
-
-		local rootNow = getRoot()
-
-		rootNow.AssemblyLinearVelocity = Vector3.zero
-		rootNow.AssemblyAngularVelocity = Vector3.zero
-
-		task.wait(0.08)
-
-		if canStart() == "Drink" then
-
-			holdCF = rootNow.CFrame
-
-			return true
-
-		end
-
-	end
-
-	return false
-
-end
-
---============================================================
--- WATER FARM
---============================================================
-
-function waterTest()
-    if running then
-        estado = "AGUARDE A TAREFA ATUAL"
+local setApenasSede = nil
+
+local function executarAutoBeberContinuo()
+    local character = LP.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+    local nivelAguaInicial = character:GetAttribute("Water") or 100
+    if nivelAguaInicial >= META_AGUA then
+        if apenasSedeAtivo and setApenasSede then setApenasSede(false) end
         return
     end
 
-    actionToken += 1
-    local token = actionToken
-    running = true
-    holdPosition = false
-    holdCF = nil
+    local hrp = character.HumanoidRootPart
+    local alturaAguaAtual = obterAlturaAtualAgua(hrp.Position)
+    if alturaAguaAtual then
+        local posOriginal = hrp.CFrame
+        local posEstrategica = Vector3.new(hrp.Position.X, alturaAguaAtual + ALTURA_OFFSET, hrp.Position.Z)
 
-    local root = getRoot()
-    local originalCF = root.CFrame
-    homeCF = originalCF
-    estado = "PROCURANDO ÁGUA"
+        local plataforma = Instance.new("Part")
+        plataforma.Name = "SatoshiWaterPlatform"
+        plataforma.Size = Vector3.new(8, 1, 8)
+        plataforma.Position = posEstrategica - Vector3.new(0, 2.5, 0)
+        plataforma.Anchored = true
+        plataforma.Transparency = 1
+        plataforma.CanCollide = true
+        plataforma.Parent = Workspace
 
+        hrp.CFrame = CFrame.new(posEstrategica) * (posOriginal - posOriginal.Position)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.8)
+
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        task.wait(0.15)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+
+        local tempoInicio = os.clock()
+        while (autoFarmUnificadoAtivo or apenasSedeAtivo) do
+            task.wait(0.5)
+            local nivelAguaAtual = character:GetAttribute("Water") or 0
+            local tempoDecorrido = os.clock() - tempoInicio
+            if nivelAguaAtual >= META_AGUA or tempoDecorrido >= 30 then break end
+            if hrp then
+                hrp.CFrame = CFrame.new(posEstrategica) * (posOriginal - posOriginal.Position)
+                hrp.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
+        plataforma:Destroy()
+        if hrp then hrp.CFrame = posOriginal end
+    end
+
+    if apenasSedeAtivo and setApenasSede then
+        setApenasSede(false)
+    end
+end
+
+local function obterMaterialAbaixo(posicao)
+    local rayOrigin = Vector3.new(posicao.X, posicao.Y + 5, posicao.Z)
+    local rayDirection = Vector3.new(0, -15, 0)
+    local params = RaycastParams.new()
+    params.IgnoreWater = true
+    local result = Workspace:Raycast(rayOrigin, rayDirection, params)
+    if result then return result.Material, result.Position end
+    return nil, nil
+end
+
+local function encontrarGramaComivelProxima(posicaoAtual)
+    local offsets = {
+        Vector3.new(0, 0, 0), Vector3.new(4, 0, 0), Vector3.new(-4, 0, 0),
+        Vector3.new(0, 0, 4), Vector3.new(0, 0, -4), Vector3.new(5, 0, 5),
+        Vector3.new(-5, 0, -5), Vector3.new(7, 0, 0), Vector3.new(-7, 0, 0),
+    }
+    for _, offset in ipairs(offsets) do
+        local ponto = posicaoAtual + offset
+        local mat, pos = obterMaterialAbaixo(ponto)
+        if mat == Enum.Material.Grass and pos then return pos end
+    end
+    return nil
+end
+
+local function executarAutoComerGramaComTempo()
+    local character = LP.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+    local nivelComidaInicial = character:GetAttribute("Food") or 100
+    if nivelComidaInicial >= META_COMIDA then return end
+
+    local hrp = character.HumanoidRootPart
+    local posOriginal = hrp.CFrame
+    local tempoInicio = os.clock()
+
+    while autoFarmUnificadoAtivo do
+        local nivelComidaAtual = character:GetAttribute("Food") or 0
+        local tempoDecorrido = os.clock() - tempoInicio
+        if nivelComidaAtual >= META_COMIDA or tempoDecorrido >= 40 then break end
+
+        local pontoGrama = encontrarGramaComivelProxima(hrp.Position)
+        if pontoGrama then
+            hrp.CFrame = CFrame.new(pontoGrama + Vector3.new(0, 2.5, 0)) * (posOriginal - posOriginal.Position)
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.4)
+
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            task.wait(0.15)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+
+            local espera = 0
+            while autoFarmUnificadoAtivo and espera < TEMPO_COMENDO_AREA do
+                task.wait(1)
+                espera = espera + 1
+                if (character:GetAttribute("Food") or 0) >= META_COMIDA then break end
+            end
+        else
+            hrp.CFrame = hrp.CFrame * CFrame.new(3, 0, 0)
+            task.wait(0.5)
+        end
+    end
+    if hrp then hrp.CFrame = posOriginal end
+end
+
+-- Loop Unificado (Fome e Sede - Automático)
+task.spawn(function()
+    while true do
+        if autoFarmUnificadoAtivo and not farmEmExecucao then
+            local character = LP.Character
+            if character then
+                local agua = character:GetAttribute("Water") or 100
+                local comida = character:GetAttribute("Food") or 100
+
+                if agua <= LIMIAR_SEDE then
+                    farmEmExecucao = true
+                    executarAutoBeberContinuo()
+                    farmEmExecucao = false
+                elseif comida <= LIMIAR_FOME then
+                    farmEmExecucao = true
+                    executarAutoComerGramaComTempo()
+                    farmEmExecucao = false
+                end
+            end
+        end
+        task.wait(2)
+    end
+end)
+
+-- Opção 1: Farmar Fome e Sede (Com BIND)
+local farmUnificadoFrame, setAutoFarm, getAutoFarmState = toggle(pages.Farm, "Farmar Fome e Sede", "Água <= 70% e Fome <= 75%: Enche ambos até 100% de forma ordenada.", false, function(v)
+    autoFarmUnificadoAtivo = v
+    if not v then farmEmExecucao = false end
+end)
+
+SatoshiAddBind(farmUnificadoFrame, "FarmUnificado", function()
+    local estadoAtual = getAutoFarmState()
+    setAutoFarm(not estadoAtual)
+end)
+
+-- Opção 2: Beber Água (Instantâneo / Manual ao ativar, Desativa sozinho ao chegar em 100%)
+local apenasSedeFrame, setApenasSedeFunc, getApenasSedeState = toggle(pages.Farm, "Beber Água", "Começa a beber água na hora e desativa automaticamente ao chegar em 100%.", false, function(v)
+    apenasSedeAtivo = v
+    if v then
+        task.spawn(function()
+            if not farmEmExecucao then
+                farmEmExecucao = true
+                executarAutoBeberContinuo()
+                farmEmExecucao = false
+            end
+        end)
+    else
+        farmEmExecucao = false
+    end
+end)
+setApenasSede = setApenasSedeFunc
+
+SatoshiAddBind(apenasSedeFrame, "ApenasSede", function()
+    local estadoAtual = getApenasSedeState()
+    setApenasSede(not estadoAtual)
+end)
+
+--============================================================
+-- ESP PLAYERS & CARCAÇAS
+--============================================================
+function getHealthColor(hum)
+    if not hum or hum.MaxHealth<=0 then return Color3.new(1,1,1) end
+    local percent=math.clamp(hum.Health/hum.MaxHealth,0,1)
+    return Color3.new(1-percent,percent,0)
+end
+
+function removeESP(player)
+    local data=espObjects[player]
+    if not data then return end
+    for _,obj in pairs(data) do pcall(function() if typeof(obj)=="Instance" then obj:Destroy() end end) end
+    espObjects[player]=nil
+end
+
+function createESP(player)
+    if player==LP then return end
+    removeESP(player)
+    local char=player.Character; if not char then return end
+    local root=char:FindFirstChild("HumanoidRootPart"); if not root then return end
+
+    local billboard=Instance.new("BillboardGui",gui); billboard.Name="SAVANA_ESP"; billboard.Adornee=root; billboard.Size=UDim2.fromOffset(300,35); billboard.StudsOffset=Vector3.new(0,4,0); billboard.AlwaysOnTop=true
+    local label=Instance.new("TextLabel",billboard); label.Size=UDim2.fromScale(1,1); label.BackgroundTransparency=1; label.TextColor3=Color3.new(0,1,0); label.TextStrokeTransparency=0.35; label.TextStrokeColor3=Color3.new(0,0,0); label.TextSize=11; label.Font=Enum.Font.GothamBold
+    local highlight=Instance.new("Highlight",gui); highlight.Name="SAVANA_HIGHLIGHT"; highlight.Adornee=char; highlight.FillColor=Color3.new(0,1,0); highlight.OutlineColor=Color3.new(0,1,0); highlight.FillTransparency=0.82; highlight.OutlineTransparency=0; highlight.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; highlight.Enabled=ShowHighlight
+
+    local originPart=Instance.new("Part",Workspace); originPart.Name="ESP_TRACER_ORIGIN"; originPart.Size=Vector3.new(0.05,0.05,0.05); originPart.Transparency=1; originPart.Anchored=true; originPart.CanCollide=false
+    local originAttachment=Instance.new("Attachment",originPart)
+    local targetAttachment=Instance.new("Attachment",root); targetAttachment.Name="SAVANA_TRACER_TARGET"
+    local beam=Instance.new("Beam",originPart); beam.Attachment0=originAttachment; beam.Attachment1=targetAttachment; beam.FaceCamera=true; beam.Width0=0.025; beam.Width1=0.025; beam.Color=ColorSequence.new(Color3.new(0,1,0)); beam.Enabled=ShowTracer
+
+    espObjects[player]={Billboard=billboard,Label=label,Highlight=highlight,OriginPart=originPart,TargetAttachment=targetAttachment,Beam=beam}
+end
+
+RunService.RenderStepped:Connect(function()
+    local camera=Workspace.CurrentCamera
+    local myChar=LP.Character; local myRoot=myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    for _,player in ipairs(Players:GetPlayers()) do
+        if player~=LP then
+            local char=player.Character; local root=char and char:FindFirstChild("HumanoidRootPart")
+            if char and root then
+                local data=espObjects[player]
+                if not data or not data.Billboard or not data.Billboard.Parent then createESP(player); data=espObjects[player] end
+                if data then
+                    local distance=(root.Position-myRoot.Position).Magnitude
+                    local visible=ESPEnabled and ESP_DISTANCE>0 and distance<=ESP_DISTANCE
+                    data.Billboard.Enabled=visible
+                    data.Highlight.Enabled=visible and ShowHighlight
+                    data.Beam.Enabled=visible and ShowTracer
+                    local animal=char:GetAttribute("AnimalName") or char:GetAttribute("AnimalClass") or "?"
+                    local hum=char:FindFirstChildOfClass("Humanoid")
+                    local hp,maxHp=0,0
+                    if hum then hp=math.floor(hum.Health); maxHp=math.floor(hum.MaxHealth) end
+                    data.Label.Text=player.DisplayName.." | "..tostring(animal).." | ♥ "..tostring(hp).." / "..tostring(maxHp).." | "..math.floor(distance).."m"
+                    local healthColor=getHealthColor(hum)
+                    data.Label.TextColor3=healthColor
+                    data.Beam.Color=ColorSequence.new(healthColor)
+                    data.Highlight.FillColor=healthColor; data.Highlight.OutlineColor=healthColor
+                    if data.OriginPart and camera then data.OriginPart.CFrame=camera.CFrame*CFrame.new(0,-2.5,-1) end
+                end
+            elseif espObjects[player] then removeESP(player) end
+        end
+    end
+end)
+
+Players.PlayerAdded:Connect(function(player) player.CharacterAdded:Connect(function() task.wait(1); createESP(player) end) end)
+Players.PlayerRemoving:Connect(removeESP)
+for _,player in ipairs(Players:GetPlayers()) do if player~=LP then if player.Character then createESP(player) end player.CharacterAdded:Connect(function() task.wait(1); createESP(player) end) end end
+
+--============================================================
+-- KILL AURA & COMBAT
+--============================================================
+local AttackRemote=ReplicatedStorage:WaitForChild("AttackHandlerRemoteEvent")
+function attackAura()
+    local char=LP.Character; if not char then return end
+    local myRoot=char:FindFirstChild("HumanoidRootPart"); if not myRoot then return end
+    if char:GetAttribute("IsSpawnProtected") or char:GetAttribute("MovementDisabled") or char:GetAttribute("IsBeingCarried") or char:GetAttribute("IsPouncing") then return end
+    local bestHum,bestDistance=nil,51
+    for _,model in ipairs(CollectionService:GetTagged("Animals")) do
+        if model~=char and model:IsA("Model") and not SatoshiIsWhitelisted(model) and not model:GetAttribute("IsPouncing") and not model:GetAttribute("IsSpawnProtected") then
+            local hum=model:FindFirstChildOfClass("Humanoid")
+            local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+            if hum and hum.Health>0 and root then
+                local d=(root.Position-myRoot.Position).Magnitude
+                if d<=50 and d<bestDistance then bestHum=hum; bestDistance=d end
+            end
+        end
+    end
+    if killAuraEnabled and bestHum and bestHum.Health>0 then pcall(function() AttackRemote:FireServer(bestHum) end) end
+end
+killAuraButton.MouseButton1Click:Connect(function() killAuraEnabled=not killAuraEnabled; lastAttack=0 end)
+RunService.Heartbeat:Connect(function() if killAuraEnabled and os.clock()-lastAttack>=0.25 then lastAttack=os.clock(); attackAura() end end)
+
+--============================================================
+-- LÓGICA DO AUTO GRAB (30 STUDS ACIMA DO INIMIGO ACOMPANHANDO)
+--============================================================
+RunService.Heartbeat:Connect(function()
+    if not autoGrabEnabled then return end
+    local char = LP.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+
+    local bestTargetRoot = nil
+    local shortestDistance = autoGrabRange
+
+    for _, model in ipairs(CollectionService:GetTagged("Animals")) do
+        if model ~= char and model:IsA("Model") and not SatoshiIsWhitelisted(model) then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+            if hum and hum.Health > 0 and root then
+                local dist = (root.Position - myRoot.Position).Magnitude
+                if dist <= shortestDistance then
+                    shortestDistance = dist
+                    bestTargetRoot = root
+                end
+            end
+        end
+    end
+
+    if bestTargetRoot then
+        SatoshiSetNoclip(true)
+        -- Posiciona exatamente 30 studs acima do centro do inimigo
+        local targetPos = bestTargetRoot.Position + Vector3.new(0, 30, 0)
+        myRoot.CFrame = CFrame.new(targetPos, bestTargetRoot.Position)
+        myRoot.AssemblyLinearVelocity = Vector3.zero
+        myRoot.AssemblyAngularVelocity = Vector3.zero
+    end
+end)
+
+--============================================================
+-- UNDERGROUND / INVISÍVEL
+--============================================================
+local undergroundEnabled=false; local undergroundY=nil; local surfaceY=nil; local undergroundToken=0
+disableUnderground=function()
+    undergroundEnabled=false; undergroundToken=undergroundToken+1
+    local char=LP.Character; local root=char and char:FindFirstChild("HumanoidRootPart")
+    local hum=char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.CameraOffset=Vector3.zero end
+    if not flyEnabled then SatoshiSetNoclip(false) end
+    if root and surfaceY then root.CFrame=CFrame.new(root.Position.X,surfaceY,root.Position.Z)*(root.CFrame-root.CFrame.Position) end
+    surfaceY=nil; undergroundY=nil; undergroundButton.Text="INVISÍVEL / UNDERGROUND: OFF"
+end
+
+enableUnderground=function()
+    if undergroundEnabled then return end
+    undergroundEnabled=true; undergroundToken=undergroundToken+1; local token=undergroundToken
+    undergroundButton.Text="INVISÍVEL: PROCURANDO..."
     task.spawn(function()
-        local rotation = originalCF - originalCF.Position
-        local x, z = originalCF.Position.X, originalCF.Position.Z
-        local startY = originalCF.Position.Y
-        local drinkY = nil
-
-        local function putY(y, waitTime)
-            if not running or actionToken ~= token then return false end
-            root = getRoot()
-            root.CFrame = CFrame.new(x, y, z) * rotation
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-            task.wait(waitTime or 0.07)
-            return canStart() == "Drink"
+        local root=getRoot(); local original=root.CFrame; surfaceY=root.Position.Y
+        local foundY=nil
+        for offset=1,250 do
+            if not undergroundEnabled or undergroundToken~=token then root.CFrame=original; return end
+            root.CFrame=CFrame.new(original.Position.X,surfaceY-offset,original.Position.Z)*(original-original.Position)
+            root.AssemblyLinearVelocity=Vector3.zero
+            RunService.Heartbeat:Wait()
+            if uCanStart()=="Drink" then foundY=root.Position.Y; break end
         end
-
-        -- Busca inicial igual à lógica que funcionava:
-        -- desce no X/Z original e PARA exatamente quando o jogo libera Drink.
-        local function initialSearch()
-            for offset = 0, 2500 do
-                if not running or actionToken ~= token then return false end
-                local y = startY - offset
-                estado = "PROCURANDO ÁGUA • ↓ " .. math.floor(offset) .. " studs"
-                if putY(y, 0.08) then
-                    drinkY = getRoot().Position.Y
-                    return true
-                end
-            end
-            return false
-        end
-
-        -- Quando o nível da água muda, a referência é SEMPRE o último Y
-        -- que realmente mostrou Drink. Nunca usa a superfície MainWaterPart.
-        local function reacquireDrink(lastY)
-            if not lastY then return false end
-
-            estado = "RELOCALIZANDO DRINK"
-
-            -- Primeiro tenta bem perto para evitar saltos até a superfície.
-            if putY(lastY, 0.06) then
-                drinkY = getRoot().Position.Y
-                return true
-            end
-
-            for d = 1, 40 do
-                if not running or actionToken ~= token then return false end
-
-                if putY(lastY + d, 0.05) then
-                    drinkY = getRoot().Position.Y
-                    return true
-                end
-
-                if putY(lastY - d, 0.05) then
-                    drinkY = getRoot().Position.Y
-                    return true
-                end
-            end
-
-            -- Se a variação foi maior, amplia ao redor do ÚLTIMO Drink,
-            -- ainda sem usar MainWaterPart.
-            for d = 41, 250 do
-                if not running or actionToken ~= token then return false end
-
-                if putY(lastY + d, 0.045) then
-                    drinkY = getRoot().Position.Y
-                    return true
-                end
-
-                if putY(lastY - d, 0.045) then
-                    drinkY = getRoot().Position.Y
-                    return true
-                end
-            end
-
-            return false
-        end
-
-        if not initialSearch() then
-            if actionToken ~= token then return end
-            pcall(function() changeState("ExitDrinking") end)
-            holdPosition = false
-            holdCF = nil
-            root = getRoot()
-            root.CFrame = originalCF
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-            running = false
-            estado = "ÁGUA NÃO ENCONTRADA • VOLTOU"
-            return
-        end
-
-        -- A partir daqui só termina quando encher ou o usuário desligar.
-        while running and actionToken == token do
-            local char = LP.Character
-            if not char then
-                task.wait(0.10)
-                continue
-            end
-
-            local water = char:GetAttribute("Water") or 0
-
-            if water >= FULL_VALUE then
-                pcall(function() changeState("ExitDrinking") end)
-                holdPosition = false
-                holdCF = nil
-                estado = "ÁGUA 100% • VOLTANDO"
-
-                root = getRoot()
-                root.CFrame = originalCF
-                root.AssemblyLinearVelocity = Vector3.zero
-                root.AssemblyAngularVelocity = Vector3.zero
-                task.wait(0.20)
-
-                running = false
-                estado = "ÁGUA FINALIZADA"
-                return
-            end
-
-            local candidateCF = CFrame.new(x, drinkY, z) * rotation
-            root = getRoot()
-            root.CFrame = candidateCF
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-            holdCF = candidateCF
-            holdPosition = true
-
-            local beforeWater = water
-            local bestWater = water
-            local lastProgress = os.clock()
-
-            estado = "BEBENDO • ÁGUA " .. math.floor(water) .. "%"
-            changeState("Drinking")
-
-            -- IMPORTANTE:
-            -- enquanto Water estiver aumentando, NÃO consulta Drink e NÃO muda Y.
-            -- CanStart pode deixar de retornar Drink durante o estado Drinking.
-            while running and actionToken == token do
-                root = getRoot()
-                root.CFrame = candidateCF
-                root.AssemblyLinearVelocity = Vector3.zero
-                root.AssemblyAngularVelocity = Vector3.zero
-
-                task.wait(0.20)
-
-                char = LP.Character
-                local nowWater = char and (char:GetAttribute("Water") or 0) or 0
-                estado = "BEBENDO • ÁGUA " .. math.floor(nowWater) .. "%"
-
-                if nowWater >= FULL_VALUE then
-                    break
-                end
-
-                if nowWater > bestWater + 0.01 then
-                    bestWater = nowWater
-                    lastProgress = os.clock()
-                end
-
-                -- Só considera que perdeu a água se a sede realmente ficou
-                -- sem subir por 2 segundos.
-                if os.clock() - lastProgress >= 2.0 then
-                    break
-                end
-            end
-
-            char = LP.Character
-            local afterWater = char and (char:GetAttribute("Water") or 0) or 0
-
-            if afterWater >= FULL_VALUE then
-                -- deixa o começo do while finalizar e voltar para HOME
-                continue
-            end
-
-            if running and actionToken == token then
-                -- Parou de ganhar Water: provavelmente o nível subiu/desceu.
-                -- Solta Drinking, acha novamente o Drink perto do último Y válido
-                -- e recomeça. NÃO encerra a função.
-                pcall(function() changeState("ExitDrinking") end)
-                holdPosition = false
-                holdCF = nil
-
-                local lastGoodY = drinkY
-                estado = "PAROU DE BEBER • AJUSTANDO ALTURA"
-
-                local found = reacquireDrink(lastGoodY)
-
-                if not found and running and actionToken == token then
-                    -- Continua tentando no mesmo entorno até Drink reaparecer.
-                    -- Isso impede Auto Farm/Beber Água de desistirem abaixo de 100%.
-                    estado = "ÁGUA <100 • AGUARDANDO DRINK"
-                    task.wait(0.35)
-                    found = reacquireDrink(lastGoodY)
-                end
-
-                if not found and running and actionToken == token then
-                    -- Se ainda não achou, volta ao último ponto bom e repete.
-                    drinkY = lastGoodY
-                    root = getRoot()
-                    root.CFrame = CFrame.new(x, drinkY, z) * rotation
-                    root.AssemblyLinearVelocity = Vector3.zero
-                    root.AssemblyAngularVelocity = Vector3.zero
-                    task.wait(0.35)
-                end
-            end
-        end
+        if not foundY then root.CFrame=original; undergroundEnabled=false; undergroundButton.Text="INVISÍVEL: NÃO ACHADO"; return end
+        undergroundY=foundY; SatoshiSetNoclip(true)
+        local hum=LP.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.CameraOffset=Vector3.new(0,surfaceY-undergroundY,0) end
+        undergroundButton.Text="INVISÍVEL / UNDERGROUND: ON"
     end)
 end
+undergroundButton.MouseButton1Click:Connect(function() if undergroundEnabled then disableUnderground() else enableUnderground() end end)
 
-beberAguaManual=false
-local setBeberAgua
-local beberAguaFrame,getBeberAguaState
-beberAguaFrame,setBeberAgua,getBeberAguaState=toggle(
-    pages.Farm,
-    "Beber Água",
-    "Liga para procurar água e beber. Desligue a qualquer momento para cancelar e voltar.",
-    false,
-    function(v)
-        beberAguaManual=v
-
-        if v then
-            if running then
-                estado="AGUARDE A TAREFA ATUAL"
-                beberAguaManual=false
-                task.defer(function() setBeberAgua(false) end)
-                return
-            end
-
-            estado="BEBER ÁGUA MANUAL"
-            waterTest()
-
-            -- Usa SEMPRE a mesma waterTest do Auto Farm.
-            -- Se uma tentativa não reconhecer a água, tenta novamente
-            -- enquanto este botão continuar ON.
-            task.spawn(function()
-                while gui.Parent and beberAguaManual do
-                    while gui.Parent and beberAguaManual and running do
-                        task.wait(0.15)
-                    end
-                    if not gui.Parent or not beberAguaManual then
-                        break
-                    end
-
-                    local char=LP.Character
-                    local water=char and (char:GetAttribute("Water") or 0) or 0
-                    if water>=FULL_VALUE then
-                        beberAguaManual=false
-                        setBeberAgua(false)
-                        break
-                    end
-
-                    task.wait(0.50)
-                    if beberAguaManual and not running then
-                        estado="BEBER ÁGUA • NOVA TENTATIVA"
-                        waterTest()
-                    end
-                end
-            end)
-        else
-            -- Se foi desligado durante a bebida, cancela a rotina atual.
-            if running then
-                actionToken += 1
-                running=false
-                holdPosition=false
-                holdCF=nil
-
-                pcall(function() changeState("ExitDrinking") end)
-
-                -- Volta imediatamente ao ponto salvo pela rotina de água.
-                local root=getRoot()
-                if homeCF then
-                    root.CFrame=homeCF
-                    root.AssemblyLinearVelocity=Vector3.zero
-                    root.AssemblyAngularVelocity=Vector3.zero
-                    estado="BEBER ÁGUA CANCELADO"
-                else
-                    estado="CANCELADO"
-                end
-            end
-        end
-    end
-)
-SatoshiAddBind(beberAguaFrame,"BeberAgua",function()
-    setBeberAgua(not getBeberAguaState())
-end)
-
-
---============================================================
--- GRASS RAYCAST
---============================================================
-
-rayParams = RaycastParams.new()
-
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-
-function updateFilter()
-
-	rayParams.FilterDescendantsInstances = {
-		getChar()
-	}
-
-end
-
---============================================================
--- GRASS USADAS
---============================================================
-
-grassUsadas = {}
-
-function grassUsada(pos)
-
-	for _, old in ipairs(grassUsadas) do
-
-		local d =
-			Vector3.new(
-				pos.X - old.X,
-				0,
-				pos.Z - old.Z
-			).Magnitude
-
-		if d <= GRASS_IGNORE_DISTANCE then
-
-			return true
-
-		end
-
-	end
-
-	return false
-
-end
-
---============================================================
--- PROCURA NOVA GRASS
---============================================================
-
-function procurarGrass()
-
-	local origem = getRoot().Position
-
-	updateFilter()
-
-	estado = "CAÇANDO GRASS"
-
-	for radius = 0, SEARCH_RADIUS, SEARCH_STEP do
-
-		if not running then
-			return nil
-		end
-
-		for angle = 0, 345, ANGLE_STEP do
-
-			local rad = math.rad(angle)
-
-			local x = origem.X + math.cos(rad) * radius
-
-			local z = origem.Z + math.sin(rad) * radius
-
-			local hit =
-				Workspace:Raycast(
-
-					Vector3.new(
-						x,
-						origem.Y + SCAN_HEIGHT,
-						z
-					),
-
-					Vector3.new(
-						0,
-						-SCAN_HEIGHT * 2,
-						0
-					),
-
-					rayParams
-
-				)
-
-			if hit and hit.Material == Enum.Material.Grass then
-
-				local pos = hit.Position + Vector3.new(0, 3, 0)
-
-				if not grassUsada(pos) then
-
-					return pos
-
-				end
-
-			end
-
-		end
-
-		task.wait()
-
-	end
-
-	return nil
-
-end
-
---============================================================
--- ESPERA EAT
---============================================================
-
-function esperarEat()
-
-	local start = os.clock()
-
-	estado = "ESPERANDO EAT"
-
-	while running and os.clock() - start < GRASS_WAIT_EAT do
-
-		local root = getRoot()
-
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-
-		if canStart() == "Eat" then
-
-			return true
-
-		end
-
-		task.wait(0.2)
-
-	end
-
-	return false
-
-end
-
---============================================================
--- COME UMA GRASS
---============================================================
-
-function comerUmaGrass(pos, token)
-
-	estado = "INDO GRASS"
-
-	if not flyTo(pos, FLY_SPEED) then
-
-		return false, "CANCELADO"
-
-	end
-
-	local root = getRoot()
-
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-
-	--========================================================
-	-- ESPERA O JOGO RECONHECER A GRASS
-	--========================================================
-
-	task.wait(0.5)
-
-	if not esperarEat() then
-
-		return false, "OUTRA"
-
-	end
-
-	--========================================================
-	-- SEGURA
-	--========================================================
-
-	root = getRoot()
-
-	holdCF = root.CFrame
-
-	holdPosition = true
-
-	task.wait(0.1)
-
-	--========================================================
-	-- COME
-	--========================================================
-
-	changeState("Eating")
-
-	estado = "COMENDO"
-
-	local oldFood = getChar():GetAttribute("Food") or 0
-
-	local lastIncrease = os.clock()
-
-	--========================================================
-	-- ESPERA ESSA GRASS ACABAR
-	--========================================================
-
-	while gui.Parent and actionToken == token do
-
-		task.wait(0.2)
-
-		local food = getChar():GetAttribute("Food") or 0
-
-		estado = "FOOD " .. math.floor(food) .. "%"
-
-		--====================================================
-		-- 100%
-		--====================================================
-
-		if food >= FULL_VALUE then
-
-			changeState("ExitEating")
-
-			holdPosition = false
-
-			holdCF = nil
-
-			return true, "CHEIO"
-
-		end
-
-		--====================================================
-		-- A GRASS AINDA ESTÁ DANDO FOOD
-		--====================================================
-
-		if food > oldFood + 0.01 then
-
-			oldFood = food
-
-			lastIncrease = os.clock()
-
-		end
-
-		--====================================================
-		-- PAROU DE DAR FOOD
-		--
-		-- GRASS FOI COMIDA/SUMIU
-		--====================================================
-
-		if os.clock() - lastIncrease >= GRASS_STOP_TIMEOUT then
-
-			estado = "PRÓXIMA GRASS"
-
-			changeState("ExitEating")
-
-			holdPosition = false
-
-			holdCF = nil
-
-			task.wait(0.15)
-
-			return false, "OUTRA"
-
-		end
-
-	end
-
-	holdPosition = false
-
-	holdCF = nil
-
-	return false, "CANCELADO"
-
-end
-
---============================================================
--- AUTO FARM GRASS
---============================================================
-
-function grassTest()
-
-	if running then
-		return
-	end
-
-	actionToken += 1
-
-	local token = actionToken
-
-	grassUsadas = {}
-
-	holdPosition = false
-
-	holdCF = nil
-
-	running = true
-
-	--========================================================
-	-- SALVA POSIÇÃO INICIAL
-	--========================================================
-
-	homeCF = getRoot().CFrame
-
-	task.spawn(function()
-
-		local food = getChar():GetAttribute("Food") or 0
-
-		if food >= FULL_VALUE then
-
-			estado = "FOOD 100%"
-
-			running = false
-
-			return
-
-		end
-
-		--====================================================
-		-- DESCE UMA VEZ
-		--====================================================
-
-		if not descerParaSubsolo() then
-
-			running = false
-
-			return
-
-		end
-
-		--====================================================
-		-- CAÇA GRASS ATÉ 100%
-		--====================================================
-
-		for tentativa = 1, GRASS_MAX_ATTEMPTS do
-
-			if actionToken ~= token then
-
-				return
-
-			end
-
-			if not running then
-				return
-			end
-
-			food = getChar():GetAttribute("Food") or 0
-
-			--================================================
-			-- CHEIO
-			--================================================
-
-			if food >= FULL_VALUE then
-
-				break
-
-			end
-
-			estado = "CAÇANDO GRASS " .. tostring(tentativa)
-
-			--================================================
-			-- ACHA OUTRA GRASS
-			--================================================
-
-			local grass = procurarGrass()
-
-			if not grass then
-
-				estado = "SEM GRASS"
-
-				running = false
-
-				return
-
-			end
-
-			--================================================
-			-- MARCA ESSA REGIÃO
-			--================================================
-
-			table.insert(grassUsadas, grass)
-
-			--================================================
-			-- VAI COMER
-			--================================================
-
-			local cheio, motivo = comerUmaGrass(grass, token)
-
-			if cheio then
-
-				break
-
-			end
-
-			if motivo == "CANCELADO" then
-
-				return
-
-			end
-
-			--================================================
-			-- GRASS ACABOU
-			-- PROCURA A PRÓXIMA
-			--================================================
-
-			estado = "CAÇANDO PRÓXIMA"
-
-			task.wait(0.15)
-
-		end
-
-		--====================================================
-		-- CONFIRMA FOOD
-		--====================================================
-
-		food = getChar():GetAttribute("Food") or 0
-
-		if food >= FULL_VALUE then
-
-			estado = "FOOD 100%"
-
-			changeState("ExitEating")
-
-			holdPosition = false
-
-			holdCF = nil
-
-			task.wait(0.2)
-
-			--================================================
-			-- VOLTA PARA ONDE COMEÇOU
-			--================================================
-
-			voltarAutomatico()
-
-			return
-
-		end
-
-		estado = "FIM GRASS"
-
-		running = false
-
-	end)
-
-end
-
---============================================================
--- AUTO FARM ÚNICO / FILA REAL
--- 1) Se água <= 70%, termina ÁGUA até 100% e volta HOME.
--- 2) SOMENTE depois verifica FOOD; se <= 65%, come até 100% e volta HOME.
--- 3) Nunca executa água e comida ao mesmo tempo.
---============================================================
-
-function esperarFarmParar()
-    while gui.Parent and autoFarmEnabled and running do
-        task.wait(0.20)
-    end
-end
-
-function esperarAguaCompletar()
-    while gui.Parent and autoFarmEnabled and running do
-        task.wait(0.20)
-    end
-
-    if not autoFarmEnabled then
-        return false
-    end
-
-    local char = LP.Character
-    local water = char and (char:GetAttribute("Water") or 0) or 0
-    return water >= FULL_VALUE
-end
-
-task.spawn(function()
-    while gui.Parent do
-        if autoFarmEnabled and not autoFarmBusy and not running then
-            local char = LP.Character
-            if char then
-                local water = char:GetAttribute("Water") or 100
-                local food = char:GetAttribute("Food") or 100
-
-                if water <= 70 or food <= 65 then
-                    autoFarmBusy = true
-
-                    -- ETAPA 1: ÁGUA. FOOD fica totalmente bloqueado aqui.
-                    if water <= 70 and autoFarmEnabled then
-                        while autoFarmEnabled do
-                            char = LP.Character
-                            water = char and (char:GetAttribute("Water") or 0) or 0
-                            if water >= FULL_VALUE then break end
-
-                            estado = "AUTO 1/2: ÁGUA • " .. math.floor(water) .. "%"
-                            if not running then
-                                waterTest()
-                            end
-                            esperarAguaCompletar()
-
-                            -- Se uma tentativa parou sem encher, NÃO segue para FOOD.
-                            -- Tenta água novamente até FULL_VALUE ou Auto Farm OFF.
-                            char = LP.Character
-                            water = char and (char:GetAttribute("Water") or 0) or 0
-                            if water < FULL_VALUE and autoFarmEnabled then
-                                estado = "AUTO ÁGUA <100 • NOVA TENTATIVA"
-                                task.wait(0.35)
-                            end
-                        end
-                    end
-
-                    -- ETAPA 2: só pode começar depois da água finalizar + voltar.
-                    if autoFarmEnabled then
-                        char = LP.Character
-                        food = char and (char:GetAttribute("Food") or 100) or 100
-
-                        if food <= 65 then
-                            estado = "AUTO 2/2: FOOD • " .. math.floor(food) .. "%"
-                            grassTest()
-                            esperarFarmParar()
-                        end
-                    end
-
-                    task.wait(0.75)
-                    autoFarmBusy = false
-                else
-                    estado = "AUTO FARM ON • FOME " .. math.floor(food) .. "% • ÁGUA " .. math.floor(water) .. "%"
-                end
-            end
-        end
-
-        task.wait(0.35)
-    end
-end)
-
---============================================================
--- VOLTAR MANUAL
---============================================================
-
-function voltarManual()
-
-	actionToken += 1
-
-	running = false
-
-	holdPosition = false
-
-	holdCF = nil
-
-	pcall(function()
-		changeState("ExitEating")
-	end)
-
-	pcall(function()
-		changeState("ExitDrinking")
-	end)
-
-	task.wait(0.1)
-
-	if not homeCF then
-
-		estado = "SEM HOME"
-
-		return
-
-	end
-
-	running = true
-
-	task.spawn(voltarAutomatico)
-
-end
-
---============================================================
--- PARAR FARM
---============================================================
-
-function parar()
-
-	actionToken += 1
-
-	running = false
-
-	holdPosition = false
-
-	holdCF = nil
-
-	pcall(function()
-		changeState("ExitEating")
-	end)
-
-	pcall(function()
-		changeState("ExitDrinking")
-	end)
-
-	local root = getRoot()
-
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-
-	estado = "PARADO"
-
-end
-
---============================================================
--- BOTÕES ESP
---============================================================
-
-espButton.MouseButton1Click:Connect(function()
-
-	ESPEnabled = not ESPEnabled
-
-	espButton.Text = "ESP: " .. (ESPEnabled and "ON" or "OFF")
-
-end)
-
-tracerButton.MouseButton1Click:Connect(function()
-
-	ShowTracer = not ShowTracer
-
-	tracerButton.Text = "TRACER: " .. (ShowTracer and "ON" or "OFF")
-
-end)
-
-highlightButton.MouseButton1Click:Connect(function()
-
-	ShowHighlight = not ShowHighlight
-
-	highlightButton.Text = "HIGHLIGHT: " .. (ShowHighlight and "ON" or "OFF")
-
-end)
-
---============================================================
--- FARM BUTTONS
---============================================================
-
-waterButton.MouseButton1Click:Connect(waterTest)
-
-grassButton.MouseButton1Click:Connect(grassTest)
-
-homeButton.MouseButton1Click:Connect(voltarManual)
-
-stopButton.MouseButton1Click:Connect(parar)
-
---============================================================
--- STATUS
---============================================================
-
-task.spawn(function()
-
-	while gui.Parent do
-
-		status.Text = estado
-
-		task.wait(0.15)
-
-	end
-
-end)
-
---============================================================
--- RESPAWN
---============================================================
-
-LP.CharacterAdded:Connect(function()
-
-	actionToken += 1
-
-	running = false
-
-	holdPosition = false
-
-	holdCF = nil
-
-	homeCF = nil
-
-	estado = "RESPAWN"
-
-	canStartText = "nil"
-
-end)
-
-
-
---============================================================
--- KILL AURA M1 - 50 STUDS - 1 ALVO POR VEZ
--- CORRIGIDO: espera com limite de tempo (5s) em vez de infinita
---============================================================
-CollectionService = game:GetService("CollectionService")
-AttackRemote = ReplicatedStorage:WaitForChild("AttackHandlerRemoteEvent", 5)
-if not AttackRemote then warn("[SATOSHI] AttackHandlerRemoteEvent nao encontrado - Aura/Hitbox nao vao atacar.") end
-KILL_RANGE, ATTACK_INTERVAL = 50, 0.25
-killAuraEnabled, lastAttack = false, 0
-
-function attackAura()
- local char=LP.Character;if not char then return end
- local myRoot=char:FindFirstChild("HumanoidRootPart");if not myRoot then return end
- if char:GetAttribute("IsSpawnProtected") or char:GetAttribute("MovementDisabled") or char:GetAttribute("IsBeingCarried") or char:GetAttribute("IsPouncing") then return end
- local bestHum=nil
- local bestDistance=KILL_RANGE+.001
- for _,model in ipairs(CollectionService:GetTagged("Animals")) do
-  if model~=char and model:IsA("Model") and not SatoshiIsWhitelisted(model) and not model:GetAttribute("IsPouncing") and not model:GetAttribute("IsSpawnProtected") then
-   local hum=model:FindFirstChildOfClass("Humanoid")
-   local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-   if hum and hum.Health>0 and root then
-    local d=(root.Position-myRoot.Position).Magnitude
-    if d<=KILL_RANGE and d<bestDistance then bestHum=hum;bestDistance=d end
-   end
-  end
- end
- if killAuraEnabled and bestHum and bestHum.Parent and bestHum.Health>0 then
-  pcall(function() AttackRemote:FireServer(bestHum) end)
- end
-end
-killAuraButton.MouseButton1Click:Connect(function()killAuraEnabled=not killAuraEnabled;lastAttack=0;killAuraButton.Text="KILL AURA: "..(killAuraEnabled and "ON" or "OFF").." • 50 STUDS" end)
-RunService.Heartbeat:Connect(function()if killAuraEnabled and os.clock()-lastAttack>=ATTACK_INTERVAL then lastAttack=os.clock();attackAura() end end)
-
---============================================================
--- INVISÍVEL / UNDERGROUND V2 - MENOS AGRESSIVO NA REDE
--- Procura CanStart()=="Drink", mas evita forçar CFrame a cada frame.
---============================================================
-undergroundEnabled = false
-undergroundY = nil
-surfaceY = nil
-undergroundToken = 0
-undergroundLastCorrection = 0
-undergroundWaterY = nil
-undergroundAdjusting = false
-
-UNDERGROUND_SCAN_MAX = 250
-UNDERGROUND_CORRECTION_INTERVAL = 0.18
-UNDERGROUND_Y_TOLERANCE = 1.25
-
-function uCanStart()
-	local ok, result = pcall(function()
-		return Utils.CanEatDrink.CanStart(getChar())
-	end)
-	return ok and result or nil
-end
-
-function setCameraOffset(value)
-	local char = LP.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum.CameraOffset = Vector3.new(0, value or 0, 0)
-	end
-end
-
-disableUnderground = function()
-	undergroundToken += 1
-	undergroundEnabled = false
-
-	local char = LP.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-
-	setCameraOffset(0)
-
-    if not flyEnabled and not SatoshiAntiBugEnabled then
-        SatoshiSetNoclip(false)
-    end
-
-	if root and surfaceY then
-		local cf = root.CFrame
-		root.CFrame =
-			CFrame.new(cf.Position.X, surfaceY, cf.Position.Z)
-			* (cf - cf.Position)
-	end
-
-	undergroundY = nil
-	surfaceY = nil
-	undergroundLastCorrection = 0
-	undergroundWaterY = nil
-	undergroundAdjusting = false
-	undergroundButton.Text = "INVISÍVEL / UNDERGROUND: OFF"
-end
-
-enableUnderground = function()
-	if undergroundEnabled then return end
-
-	undergroundEnabled = true
-	undergroundToken += 1
-	local token = undergroundToken
-
-	undergroundButton.Text = "INVISÍVEL: PROCURANDO..."
-
-	task.spawn(function()
-		local root = getRoot()
-		local original = root.CFrame
-		surfaceY = root.Position.Y
-
-		local fixedX = original.Position.X
-		local fixedZ = original.Position.Z
-		local rotation = original - original.Position
-		local foundY = nil
-
-		-- Busca em passos de 1 stud, como a versão que funcionou.
-		for offset = 1, UNDERGROUND_SCAN_MAX do
-			if not undergroundEnabled or undergroundToken ~= token then
-				root.CFrame = original
-				return
-			end
-
-			local y = surfaceY - offset
-
-			root.CFrame =
-				CFrame.new(fixedX, y, fixedZ)
-				* rotation
-
-			-- Durante a busca paramos a queda; depois liberamos movimento normal.
-			local vel = root.AssemblyLinearVelocity
-			root.AssemblyLinearVelocity = Vector3.new(vel.X, 0, vel.Z)
-
-			RunService.Heartbeat:Wait()
-
-			if uCanStart() == "Drink" then
-				foundY = root.Position.Y
-				break
-			end
-		end
-
-		if not foundY then
-			root.CFrame = original
-			undergroundEnabled = false
-			surfaceY = nil
-			undergroundButton.Text = "INVISÍVEL: CAMADA NÃO ACHADA"
-			task.wait(1.2)
-
-			if not undergroundEnabled then
-				undergroundButton.Text = "INVISÍVEL / UNDERGROUND: OFF"
-			end
-			return
-		end
-
-		undergroundY = foundY
-        local mainWater = Workspace:FindFirstChild("MainWaterPart")
-        undergroundWaterY = (mainWater and mainWater:IsA("BasePart")) and mainWater.Position.Y or nil
-
-        -- Debaixo do Terrain fica em Noclip para a física não empurrar
-        -- o personagem para cima/baixo e causar tremedeira.
-        SatoshiSetNoclip(true)
-        root.AssemblyLinearVelocity=Vector3.new(root.AssemblyLinearVelocity.X,0,root.AssemblyLinearVelocity.Z)
-        root.AssemblyAngularVelocity=Vector3.zero
-
-		-- Mantém a câmera compensada sem alterar o CFrame da câmera.
-		setCameraOffset(surfaceY - undergroundY)
-
-		undergroundLastCorrection = os.clock()
-		undergroundButton.Text = "INVISÍVEL / UNDERGROUND: ON"
-	end)
-end
-
-undergroundButton.MouseButton1Click:Connect(function()
-	if undergroundEnabled then
-		disableUnderground()
-	else
-		enableUnderground()
-	end
-end)
-
--- SUBSOLO DINÂMICO:
--- Mantém X/Z livres, mas acompanha o nível da água.
--- MainWaterPart dá a variação rápida; CanStart()=="Drink" confirma a camada real.
 RunService.Heartbeat:Connect(function()
     if not undergroundEnabled or not undergroundY then return end
-
-    local char=LP.Character
-    local root=char and char:FindFirstChild("HumanoidRootPart")
+    local char=LP.Character; local root=char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
-
     SatoshiSetNoclip(true)
-
-    local vel=root.AssemblyLinearVelocity
-    root.AssemblyLinearVelocity=Vector3.new(vel.X,0,vel.Z)
-    root.AssemblyAngularVelocity=Vector3.zero
-
-    -- Se MainWaterPart subiu/desceu (chuva/nível), move o Subsolo pelo mesmo delta.
-    local mainWater=Workspace:FindFirstChild("MainWaterPart")
-    if mainWater and mainWater:IsA("BasePart") then
-        local currentWaterY=mainWater.Position.Y
-        if undergroundWaterY then
-            local delta=currentWaterY-undergroundWaterY
-            if math.abs(delta)>0.01 then
-                undergroundY += delta
-                undergroundWaterY=currentWaterY
-                setCameraOffset(surfaceY-undergroundY)
-            end
-        else
-            undergroundWaterY=currentWaterY
-        end
-    end
-
+    root.AssemblyLinearVelocity=Vector3.zero; root.AssemblyAngularVelocity=Vector3.zero
     local cf=root.CFrame
-    if math.abs(root.Position.Y-undergroundY)>0.03 then
-        root.CFrame=CFrame.new(cf.Position.X,undergroundY,cf.Position.Z)*(cf-cf.Position)
-    end
+    if math.abs(root.Position.Y-undergroundY)>0.03 then root.CFrame=CFrame.new(cf.Position.X,undergroundY,cf.Position.Z)*(cf-cf.Position) end
+end)
 
-    -- A cada intervalo confirma pelo botão Drink.
-    -- Se perdeu a camada, procura poucos studs acima/abaixo sem travar X/Z.
-    if not undergroundAdjusting
-    and os.clock()-undergroundLastCorrection>=UNDERGROUND_CORRECTION_INTERVAL
-    and uCanStart()~="Drink" then
-        undergroundAdjusting=true
-        undergroundLastCorrection=os.clock()
-
-        task.spawn(function()
-            local r=getRoot()
-            local baseY=undergroundY
-            local rot=r.CFrame-r.CFrame.Position
-            local px,pz=r.Position.X,r.Position.Z
-            local found=nil
-
-            for d=1,20 do
-                if not undergroundEnabled then break end
-
-                r.CFrame=CFrame.new(px,baseY+d,pz)*rot
-                r.AssemblyLinearVelocity=Vector3.zero
-                task.wait(0.04)
-                if uCanStart()=="Drink" then found=r.Position.Y break end
-
-                r.CFrame=CFrame.new(px,baseY-d,pz)*rot
-                r.AssemblyLinearVelocity=Vector3.zero
-                task.wait(0.04)
-                if uCanStart()=="Drink" then found=r.Position.Y break end
-            end
-
-            if undergroundEnabled then
-                if found then
-                    undergroundY=found
-                    setCameraOffset(surfaceY-undergroundY)
-                    undergroundButton.Text="INVISÍVEL / UNDERGROUND: ON"
-                else
-                    r.CFrame=CFrame.new(px,undergroundY,pz)*rot
-                    undergroundButton.Text="INVISÍVEL: ACOMPANHANDO ÁGUA..."
+--============================================================
+-- HITBOX GRAB & ATAQUES
+--============================================================
+local PounceRemote=ReplicatedStorage:WaitForChild("SpecialAttackRemoteEvent_PounceAttack")
+local specialHitboxLast=0
+function fireSpecialHitbox()
+    if not specialHitboxEnabled or os.clock()-specialHitboxLast<.35 then return end
+    local char=LP.Character; local myRoot=char and char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    for _,animal in ipairs(CollectionService:GetTagged("Animals")) do
+        if animal~=char and animal:IsA("Model") and not SatoshiIsWhitelisted(animal) then
+            local hum=animal:FindFirstChild("Humanoid")
+            local root=animal:FindFirstChild("HumanoidRootPart")
+            local folder=animal:FindFirstChild("RagdollColliderParts")
+            local rag=folder and folder:FindFirstChild("RagdollColliderRootPart")
+            if hum and hum.Health>0 and root and rag then
+                if (root.Position-myRoot.Position).Magnitude<=specialHitboxRange then
+                    specialHitboxLast=os.clock()
+                    pcall(function() PounceRemote:FireServer(hum,rag) end)
+                    break
                 end
             end
-
-            undergroundAdjusting=false
-        end)
+        end
     end
-
-    root.AssemblyLinearVelocity=Vector3.new(root.AssemblyLinearVelocity.X,0,root.AssemblyLinearVelocity.Z)
-end)
-
-LP.CharacterAdded:Connect(function()
-	undergroundToken += 1
-	undergroundEnabled = false
-	undergroundY = nil
-	surfaceY = nil
-	undergroundLastCorrection = 0
-	undergroundWaterY = nil
-	undergroundAdjusting = false
-	killAuraEnabled = false
-
-	task.defer(function()
-		setCameraOffset(0)
-
-		if undergroundButton and undergroundButton.Parent then
-			undergroundButton.Text = "INVISÍVEL / UNDERGROUND: OFF"
-		end
-
-		if killAuraButton and killAuraButton.Parent then
-			killAuraButton.Text = "KILL AURA: OFF • 50 STUDS"
-		end
-	end)
-end)
-
-
---============================================================
--- NOVAS FUNÇÕES INTEGRADAS
--- CORRIGIDO: esperas com limite de tempo (5s)
---============================================================
-PounceRemote=ReplicatedStorage:WaitForChild("SpecialAttackRemoteEvent_PounceAttack", 5)
-if not PounceRemote then warn("[SATOSHI] SpecialAttackRemoteEvent_PounceAttack nao encontrado - Grab/Pounce nao vai funcionar.") end
-
--- Hitbox Grab / Pounce manual
--- PC: tecla F (ataque especial original).
--- Mobile: botão oficial "SpecialAttackButton".
-specialHitboxLast=0
-specialHitboxMobileConnection=nil
-specialHitboxMobileButton=nil
-
-function getSpecialHitboxTarget()
- local char=LP.Character
- local myRoot=char and char:FindFirstChild("HumanoidRootPart")
- if not myRoot then return nil,nil end
- local bestHum,bestRag,bestD=nil,nil,specialHitboxRange+.01
- for _,animal in ipairs(CollectionService:GetTagged("Animals")) do
-  if animal~=char and animal:IsA("Model") and not SatoshiIsWhitelisted(animal) and not animal:GetAttribute("IsSpawnProtected") and not animal:GetAttribute("IsPouncing") and not animal:GetAttribute("IsBeingCarried") and not animal:GetAttribute("IsCarrying") then
-   local hum=animal:FindFirstChild("Humanoid")
-   local root=animal:FindFirstChild("HumanoidRootPart")
-   local folder=animal:FindFirstChild("RagdollColliderParts")
-   local rag=folder and folder:FindFirstChild("RagdollColliderRootPart")
-   if hum and hum.Health>0 and root and rag then
-    local d=(root.Position-myRoot.Position).Magnitude
-    if d<=specialHitboxRange and d<bestD then bestHum,bestRag,bestD=hum,rag,d end
-   end
-  end
- end
- return bestHum,bestRag
 end
+UIS.InputBegan:Connect(function(input) if input.KeyCode==Enum.KeyCode.F then fireSpecialHitbox() end end)
 
-function fireSpecialHitbox()
- if not specialHitboxEnabled or os.clock()-specialHitboxLast<.35 then return end
- local hum,rag=getSpecialHitboxTarget()
- if hum and rag then
-  specialHitboxLast=os.clock()
-  pcall(function() PounceRemote:FireServer(hum,rag) end)
- end
-end
-
-UIS.InputBegan:Connect(function(input)
- if UIS:GetFocusedTextBox() then return end
- if input.UserInputType==Enum.UserInputType.Keyboard and input.KeyCode==Enum.KeyCode.F then
-  fireSpecialHitbox()
- end
-end)
-
-function connectSpecialAttackButton(button)
- if not button or not button:IsA("GuiButton") then return end
- if specialHitboxMobileButton==button and specialHitboxMobileConnection then return end
- if specialHitboxMobileConnection then specialHitboxMobileConnection:Disconnect();specialHitboxMobileConnection=nil end
- specialHitboxMobileButton=button
- specialHitboxMobileConnection=button.Activated:Connect(function() fireSpecialHitbox() end)
-end
-
-function findSpecialAttackButton()
- local button=PlayerGui:FindFirstChild("SpecialAttackButton",true)
- if button and button:IsA("GuiButton") then connectSpecialAttackButton(button);return true end
- return false
-end
-
-if UIS.TouchEnabled then
- task.spawn(function()
-  while gui.Parent and not findSpecialAttackButton() do task.wait(.25) end
- end)
- PlayerGui.DescendantAdded:Connect(function(obj)
-  if obj.Name=="SpecialAttackButton" and obj:IsA("GuiButton") then task.defer(function() connectSpecialAttackButton(obj) end) end
- end)
- PlayerGui.DescendantRemoving:Connect(function(obj)
-  if obj==specialHitboxMobileButton then
-   if specialHitboxMobileConnection then specialHitboxMobileConnection:Disconnect();specialHitboxMobileConnection=nil end
-   specialHitboxMobileButton=nil
-  end
- end)
-end
-
-LatchRemote=ReplicatedStorage:WaitForChild("LatchedPlayersNotifyRemoteEvent", 5)
-LatchConfig=nil
-pcall(function()
- local core=ReplicatedStorage:WaitForChild("AnimalGameSharedCore", 5)
- local cfg=core and core:WaitForChild("LatchEscapeConfig", 5)
- LatchConfig=cfg and require(cfg)
-end)
-if not LatchRemote or not LatchConfig then warn("[SATOSHI] Latch (desagarrar) nao encontrado - Desagarrar Automatico nao vai funcionar.") end
-latchedPlayers={}; local escapeThread=nil
-
-function stopEscape() if escapeThread then task.cancel(escapeThread);escapeThread=nil end end
-local escapeWarned=false
-local function escWarn(msg)
- if escapeWarned then return end
- escapeWarned=true
- warn("[SATOSHI] Desagarrar: "..msg)
- if LatchConfig then
-  local keys={}
-  for k,v in pairs(LatchConfig) do keys[#keys+1]=tostring(k).."("..typeof(v)..")" end
-  warn("[SATOSHI] LatchEscapeConfig tem: "..table.concat(keys,", "))
- end
-end
-local function cfgNum(k,d)
- local v=LatchConfig and LatchConfig[k]
- return type(v)=="number" and v or d
-end
-function startEscape()
- stopEscape(); if not LatchRemote then return end
- if not autoDesgrabEnabled or #latchedPlayers==0 then return end
- escapeThread=task.spawn(function()
-  while autoDesgrabEnabled and #latchedPlayers>0 do
-   local char=LP.Character;if not char then break end
-   local waitHit,waitNext=0.45,0.6 -- fallback caso o jogo tenha mudado a config
-   local okCalc=pcall(function()
-    local speed=LatchConfig.getRingScaleSpeed(char,latchedPlayers)
-    local targetScale=(LatchConfig.MIN_CORRECT_SCALE+LatchConfig.MAX_CORRECT_SCALE)/2
-    local t=(LatchConfig.MAX_SIZE_SCALE-targetScale)/speed
-    assert(type(t)=="number" and t==t and t>0 and t<30)
-    waitHit=t
-    waitNext=LatchConfig.PAUSE_TIME+LatchConfig.TIME_BEFORE_NEXT_PRESS_AFTER_PAUSE+0.02
-   end)
-   if not okCalc then escWarn("config do jogo mudou (usando tempo fixo). Mande esse aviso pro suporte.") end
-   task.wait(waitHit)
-   if not autoDesgrabEnabled or #latchedPlayers<=0 then break end
-   pcall(function() LatchRemote:FireServer() end)
-   task.wait(waitNext)
-  end
-  escapeThread=nil
- end)
-end
-if LatchRemote then
- LatchRemote.OnClientEvent:Connect(function(list)
-  if type(list)~="table" then return end; latchedPlayers=list
-  if #list==0 then stopEscape() elseif autoDesgrabEnabled then startEscape() end
- end)
-end
-
--- Hitbox manual corrigido:
--- PC: clique esquerdo.
--- Mobile: SOMENTE o botão oficial "NormalAttackButton".
-hitboxLast=0
-hitboxMobileConnection=nil
-hitboxMobileButton=nil
-
-function getHitboxTarget()
- local char=LP.Character; local myRoot=char and char:FindFirstChild("HumanoidRootPart"); if not myRoot then return nil end
- local best,bestD=nil,hitboxRange
- for _,model in ipairs(CollectionService:GetTagged("Animals")) do
-  if model~=char and model:IsA("Model") and not SatoshiIsWhitelisted(model) and not model:GetAttribute("IsSpawnProtected") and not model:GetAttribute("IsPouncing") then
-   local hum=model:FindFirstChildOfClass("Humanoid"); local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-   if hum and hum.Health>0 and root then local d=(root.Position-myRoot.Position).Magnitude;if d<=bestD then best,bestD=hum,d end end
-  end
- end
- return best
-end
-
+local hitboxLast=0
 function fireHitboxAttack()
- if not hitboxEnabled or os.clock()-hitboxLast<.20 then return end
- hitboxLast=os.clock()
- local hum=getHitboxTarget()
- if hum then
-  pcall(function() AttackRemote:FireServer(hum) end)
- end
-end
-
--- PC: não escuta Touch. Assim tocar/arrastar a tela no mobile não dispara Hitbox.
-UIS.InputBegan:Connect(function(input,processed)
- if processed or UIS.TouchEnabled then return end
- if input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
- fireHitboxAttack()
-end)
-
-function connectNormalAttackButton(button)
- if not button or not button:IsA("GuiButton") then return end
- if hitboxMobileButton==button and hitboxMobileConnection then return end
-
- if hitboxMobileConnection then
-  hitboxMobileConnection:Disconnect()
-  hitboxMobileConnection=nil
- end
-
- hitboxMobileButton=button
- hitboxMobileConnection=button.Activated:Connect(function()
-  fireHitboxAttack()
- end)
-end
-
-function findNormalAttackButton()
- local button=PlayerGui:FindFirstChild("NormalAttackButton",true)
- if button and button:IsA("GuiButton") then
-  connectNormalAttackButton(button)
-  return true
- end
- return false
-end
-
--- O React pode montar/recriar os botões depois que o painel já carregou.
-if UIS.TouchEnabled then
- task.spawn(function()
-  while gui.Parent and not findNormalAttackButton() do
-   task.wait(.25)
-  end
- end)
-
- PlayerGui.DescendantAdded:Connect(function(obj)
-  if obj.Name=="NormalAttackButton" and obj:IsA("GuiButton") then
-   task.defer(function()
-    connectNormalAttackButton(obj)
-   end)
-  end
- end)
-
- PlayerGui.DescendantRemoving:Connect(function(obj)
-  if obj==hitboxMobileButton then
-   if hitboxMobileConnection then
-    hitboxMobileConnection:Disconnect()
-    hitboxMobileConnection=nil
-   end
-   hitboxMobileButton=nil
-  end
- end)
-end
-
--- Auto Grab / Pounce
-function getGrabTarget()
- local char=LP.Character;local myRoot=char and char:FindFirstChild("HumanoidRootPart");if not myRoot then return nil end
- local bestHum,bestRag,bestD=nil,nil,autoGrabRange+.01
- for _,animal in ipairs(CollectionService:GetTagged("Animals")) do
-  if animal~=char and animal:IsA("Model") and not SatoshiIsWhitelisted(animal) and not animal:GetAttribute("IsSpawnProtected") and not animal:GetAttribute("IsPouncing") and not animal:GetAttribute("IsBeingCarried") and not animal:GetAttribute("IsCarrying") then
-   local hum=animal:FindFirstChild("Humanoid");local root=animal:FindFirstChild("HumanoidRootPart");local folder=animal:FindFirstChild("RagdollColliderParts");local rag=folder and folder:FindFirstChild("RagdollColliderRootPart")
-   if hum and hum.Health>0 and root and rag then local d=(root.Position-myRoot.Position).Magnitude;if d<=autoGrabRange and d<bestD then bestHum,bestRag,bestD=hum,rag,d end end
-  end
- end
- return bestHum,bestRag
-end
-task.spawn(function()
- while gui.Parent do
-  if autoGrabEnabled then
-   local char=LP.Character
-   if char and not char:GetAttribute("IsPouncing") and not char:GetAttribute("MovementDisabled") and not char:GetAttribute("IsCarrying") and not char:GetAttribute("IsBeingCarried") then
-    local hum,rag=getGrabTarget();if hum and rag then pcall(function() PounceRemote:FireServer(hum,rag) end) end
-   end
-  end
-  task.wait(.25)
- end
-end)
-
-LP.CharacterAdded:Connect(function()
-    if flyEnabled then stopFly() end
-end)
-
--- Velocidade + stamina/oxigênio
-RunService.Heartbeat:Connect(function()
- local char=LP.Character;if not char then return end
- local hum=char:FindFirstChildOfClass("Humanoid")
- if hum and speedEnabled and speedValue>0 then hum.WalkSpeed=speedValue end
- if infiniteStats then char:SetAttribute("Stamina",100);char:SetAttribute("Oxygen",100);char:SetAttribute("StaminaRanOut",false) end
-end)
-
--- Sempre Dia: trava o relógio visual em 12:00 somente enquanto estiver ON
-RunService.RenderStepped:Connect(function()
-    if sempreDiaEnabled then
-        Lighting.ClockTime = 12
+    if not hitboxEnabled or os.clock()-hitboxLast<.20 then return end
+    hitboxLast=os.clock()
+    local char=LP.Character; local myRoot=char and char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    for _,model in ipairs(CollectionService:GetTagged("Animals")) do
+        if model~=char and model:IsA("Model") and not SatoshiIsWhitelisted(model) then
+            local hum=model:FindFirstChildOfClass("Humanoid")
+            local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+            if hum and hum.Health>0 and root then
+                if (root.Position-myRoot.Position).Magnitude<=hitboxRange then
+                    pcall(function() AttackRemote:FireServer(hum) end)
+                    break
+                end
+            end
+        end
     end
-end)
+end
+UIS.InputBegan:Connect(function(input,processed) if not processed and input.UserInputType==Enum.UserInputType.MouseButton1 then fireHitboxAttack() end end)
 
--- sincroniza desgrab quando o toggle muda de estado
+--============================================================
+-- LOOP GERAL DE STATUS E MOVIMENTO
+--============================================================
 RunService.Heartbeat:Connect(function()
- if autoDesgrabEnabled and #latchedPlayers>0 and not escapeThread then startEscape() end
- if not autoDesgrabEnabled and escapeThread then stopEscape() end
+    local char=LP.Character; if not char then return end
+    local hum=char:FindFirstChildOfClass("Humanoid")
+    if hum and speedEnabled and speedValue>0 then hum.WalkSpeed=speedValue end
+    if infiniteStats then char:SetAttribute("Stamina",100); char:SetAttribute("Oxygen",100) end
 end)
-
-
+RunService.RenderStepped:Connect(function() if sempreDiaEnabled then Lighting.ClockTime=12 end end)
 
 --============================================================
 -- ATALHOS FLUTUANTES MOBILE
--- A aba FLUTUANTE escolhe quais controles ON/OFF aparecem na tela.
--- Cada controle usa o mesmo setter/getter da opção original.
 --============================================================
 SatoshiFloatGui=Instance.new("ScreenGui")
 SatoshiFloatGui.Name="SatoshiFloatingControls"
@@ -3246,7 +1115,7 @@ SatoshiFloatDefs={
     Aura={title="AUTO ATAQUE",getter=getKillState,setter=setKill},
     Hitbox={title="HITBOX",getter=getHitboxState,setter=setHitbox},
     Grab={title="AUTO AGARRAR",getter=getGrabState,setter=setGrab},
-    Water={title="BEBER ÁGUA",getter=getBeberAguaState,setter=setBeberAgua},
+    Water={title="BEBER ÁGUA",getter=getApenasSedeState,setter=setApenasSede},
     Underground={title="SUBSOLO",getter=getUnderState,setter=setUnder},
 }
 
@@ -3327,7 +1196,6 @@ function SatoshiSetFloat(name,on,index)
     end
 end
 
--- Mantém o visual das caixinhas sincronizado com as opções originais.
 task.spawn(function()
     while gui.Parent do
         for name,on in pairs(SatoshiFloatEnabled) do
@@ -3359,7 +1227,6 @@ end
 
 --============================================================
 -- PERFIS DE CONFIGURAÇÃO
--- Salva toggles, sliders e binds em arquivo local do executor.
 --============================================================
 SatoshiProfileFolder="SATOSHI_SCRIPTS/profiles"
 
@@ -3401,8 +1268,7 @@ function SatoshiCaptureProfile()
             SpecialHitbox=getSpecialHitboxState(),
             Grab=getGrabState(), Desgrab=getDesgrabState(),
             Speed=getSpeedState(), Inf=getInfState(), Fly=getFlyState(),
-            Subsolo=getUnderState(), AutoFarm=getAutoFarmState(),
-            BeberAgua=getBeberAguaState()
+            Subsolo=getUnderState(), AutoFarm=getAutoFarmState(), ApenasSede=getApenasSedeState()
         },
         sliders={
             ESP=getESPValue(), Carcass=getCarcassValue(),
@@ -3418,7 +1284,6 @@ function SatoshiApplyProfile(data)
     local sl=data.sliders or {}
     local tg=data.toggles or {}
 
-    -- Valores primeiro, depois estados.
     if sl.ESP~=nil then setESPValue(sl.ESP) end
     if sl.Carcass~=nil then setCarcassValue(sl.Carcass) end
     if sl.Hitbox~=nil then setHitboxValue(sl.Hitbox) end
@@ -3441,7 +1306,7 @@ function SatoshiApplyProfile(data)
     if tg.Fly~=nil then setFly(tg.Fly) end
     if tg.Subsolo~=nil then setUnder(tg.Subsolo) end
     if tg.AutoFarm~=nil then setAutoFarm(tg.AutoFarm) end
-    if tg.BeberAgua~=nil then setBeberAgua(tg.BeberAgua) end
+    if tg.ApenasSede~=nil then setApenasSede(tg.ApenasSede) end
 
     if type(data.binds)=="table" then
         for name,keyName in pairs(data.binds) do
@@ -3456,7 +1321,6 @@ function SatoshiApplyProfile(data)
     return true
 end
 
--- Mantém referência dos botões de bind para restaurar o texto ao carregar perfil.
 profileCard=card(pages.Profiles,"Salvar configurações","Salva suas opções, valores e binds em um perfil.",116)
 profileName=Instance.new("TextBox",profileCard)
 profileName.Position=UDim2.new(0,14,0,62)
@@ -3526,4 +1390,20 @@ action(pages.Profiles,"🗑 EXCLUIR PERFIL",function()
     end
 end)
 
-print("[SAVANA HUB FINAL V2] tudo OFF | Underground rede leve | RightShift PC | ícone mobile")
+-- Arrastar janela e fechar
+bubble=Instance.new("TextButton",gui); bubble.AnchorPoint=Vector2.new(.5,.5); bubble.Position=UDim2.fromScale(.075,.55); bubble.Size=UDim2.fromOffset(52,52); bubble.BackgroundColor3=Color3.fromRGB(25,22,35); bubble.Text="🦁"; bubble.TextScaled=true; bubble.Visible=false; bubble.Active=true; bubble.BorderSizePixel=0; Instance.new("UICorner",bubble).CornerRadius=UDim.new(1,0)
+menuOpen=true
+function setMenu(v) menuOpen=v; frame.Visible=v; bubble.Visible=not v end
+close.MouseButton1Click:Connect(function() setMenu(false) end)
+UIS.InputBegan:Connect(function(input,gp) if not gp and input.KeyCode==Enum.KeyCode.RightShift then setMenu(not menuOpen) end end)
+makeDraggable=function(handle,target,onTap)
+    local dragging,moved=false,false; local start,pos,current
+    handle.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true; moved=false; start=i.Position; pos=target.Position end end)
+    handle.InputChanged:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then current=i end end)
+    UIS.InputChanged:Connect(function(i) if dragging and i==current and Workspace.CurrentCamera then local d=i.Position-start; if d.Magnitude>6 then moved=true end; local vp=Workspace.CurrentCamera.ViewportSize; target.Position=UDim2.fromScale(pos.X.Scale+d.X/vp.X,pos.Y.Scale+d.Y/vp.Y) end end)
+    UIS.InputEnded:Connect(function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch) then dragging=false; if onTap and not moved then onTap() end end end)
+end
+makeDraggable(header,frame); makeDraggable(bubble,bubble,function() setMenu(true) end); openPage("Visual")
+
+profileLabel=Instance.new("TextLabel",sidebar); profileLabel.AnchorPoint=Vector2.new(0,1); profileLabel.Position=UDim2.fromScale(.08,.965); profileLabel.Size=UDim2.fromScale(.84,.09); profileLabel.BackgroundTransparency=1; profileLabel.Text=LP.DisplayName.."\n@"..LP.Name; profileLabel.TextColor3=Color3.fromRGB(225,223,235); profileLabel.TextXAlignment=Enum.TextXAlignment.Left; profileLabel.TextYAlignment=Enum.TextYAlignment.Center; profileLabel.Font=Enum.Font.GothamMedium; profileLabel.TextSize=10
+print("[SATOSHI HUB] Carregado com sucesso!")
