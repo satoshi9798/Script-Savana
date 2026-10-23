@@ -302,6 +302,7 @@ local ShowHighlight = false
 local carcassESPEnabled = false
 local CARCASS_ESP_DISTANCE = 500
 local carcassESPObjects = {}
+local carcassCache = {}
 
 local killAuraEnabled, lastAttack = false, 0
 local enableUnderground, disableUnderground
@@ -601,13 +602,13 @@ function startFly()
 end
 
 _,setESP,getESPState,setESPValue,getESPValue=toggleSlider(pages.Visual,"ESP Players","Nome, animal, vida e distância.",false,0,1500,500,function(v) ESPEnabled=v end,function(v) ESP_DISTANCE=v end)
-_,setCarcassESP,getCarcassState,setCarcassValue,getCarcassValue=toggleSlider(pages.Visual,"Carcaças Mortas","Destaca carcaças e mostra a distância.",false,0,1000,500,function(v) carcassESPEnabled=v end,function(v) CARCASS_ESP_DISTANCE=v end)
+_,setCarcassESP,getCarcassState,setCarcassValue,getCarcassValue=toggleSlider(pages.Visual,"Carcaças Mortas","Destaca carcaças com o nome exato de quem morreu.",false,0,1000,500,function(v) carcassESPEnabled=v end,function(v) CARCASS_ESP_DISTANCE=v end)
 _,setTracer,getTracerState=toggle(pages.Visual,"Linha Rastreadora","Linha até os jogadores visíveis.",false,function(v) ShowTracer=v end)
 _,setHighlight,getHighlightState=toggle(pages.Visual,"Contorno","Destaca o personagem conforme a vida.",false,function(v) ShowHighlight=v end)
 _,setSempreDia,getSempreDiaState=toggle(pages.Visual,"Sempre Dia","Trava o relógio visual em 12:00.",false,function(v) sempreDiaEnabled=v end)
 
 killAuraButton=Instance.new("TextButton")
-auraFrame,setKill,getKillState=toggle(pages.Combat,"Aura de Ataque","Ataca todos os alvos no raio em até 50 studs.",false,function(v) killAuraEnabled=v; lastAttack=0 end)
+auraFrame,setKill,getKillState=toggle(pages.Combat,"Aura de Ataque","Ataca todos os alvos no raio em até 50 studs simultaneamente.",false,function(v) killAuraEnabled=v; lastAttack=0 end)
 hitboxFrame,setHitbox,getHitboxState,setHitboxValue,getHitboxValue=toggleSlider(pages.Combat,"Hitbox","Amplia o alcance do ataque manual.",false,0,60,50,function(v) hitboxEnabled=v end,function(v) hitboxRange=v end)
 SatoshiAddBind(auraFrame,"Aura",function() setKill(not getKillState()) end)
 SatoshiAddBind(hitboxFrame,"Hitbox",function() setHitbox(not getHitboxState()) end)
@@ -912,7 +913,7 @@ SatoshiAddBind(apenasSedeFrame, "ApenasSede", function()
 end)
 
 --============================================================
--- ESP PLAYERS & CARCAÇAS
+-- ESP PLAYERS & CARCAÇAS INTELIGENTES
 --============================================================
 function getHealthColor(hum)
     if not hum or hum.MaxHealth<=0 then return Color3.new(1,1,1) end
@@ -945,10 +946,19 @@ function createESP(player)
     espObjects[player]={Billboard=billboard,Label=label,Highlight=highlight,OriginPart=originPart,TargetAttachment=targetAttachment,Beam=beam}
 end
 
+function removeCarcassESP(obj)
+    if carcassESPObjects[obj] then
+        for _,v in pairs(carcassESPObjects[obj]) do pcall(function() v:Destroy() end) end
+        carcassESPObjects[obj]=nil
+    end
+end
+
 RunService.RenderStepped:Connect(function()
     local camera=Workspace.CurrentCamera
     local myChar=LP.Character; local myRoot=myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myRoot then return end
+
+    -- Renderiza e atualiza ESP dos Players Vivos + Guarda no Cache o Último Nome
     for _,player in ipairs(Players:GetPlayers()) do
         if player~=LP then
             local char=player.Character; local root=char and char:FindFirstChild("HumanoidRootPart")
@@ -971,8 +981,62 @@ RunService.RenderStepped:Connect(function()
                     data.Beam.Color=ColorSequence.new(healthColor)
                     data.Highlight.FillColor=healthColor; data.Highlight.OutlineColor=healthColor
                     if data.OriginPart and camera then data.OriginPart.CFrame=camera.CFrame*CFrame.new(0,-2.5,-1) end
+
+                    -- Armazena o nome limpo no cache para quando virar carcaça
+                    carcassCache[char] = player.DisplayName
                 end
             elseif espObjects[player] then removeESP(player) end
+        end
+    end
+
+    -- Renderiza ESP das Carcaças Mortas com o Nome Capturado do Cache
+    if not carcassESPEnabled then
+        for obj,_ in pairs(carcassESPObjects) do removeCarcassESP(obj) end
+        return
+    end
+
+    for _, model in ipairs(CollectionService:GetTagged("Animals")) do
+        if model ~= myChar and model:IsA("Model") then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+            local isDead = (hum and hum.Health <= 0) or not hum or not model.Parent
+
+            if isDead and root then
+                local dist = (root.Position - myRoot.Position).Magnitude
+                if dist <= CARCASS_ESP_DISTANCE then
+                    local data = carcassESPObjects[model]
+                    if not data then
+                        local cleanName = carcassCache[model] or model.Name
+                        local billboard = Instance.new("BillboardGui", gui)
+                        billboard.Name = "SATOSHI_CARCASS_ESP"
+                        billboard.Adornee = root
+                        billboard.Size = UDim2.fromOffset(250, 30)
+                        billboard.StudsOffset = Vector3.new(0, 2, 0)
+                        billboard.AlwaysOnTop = true
+
+                        local label = Instance.new("TextLabel", billboard)
+                        label.Size = UDim2.fromScale(1, 1)
+                        label.BackgroundTransparency = 1
+                        label.Text = "CARCAÇA: " .. cleanName
+                        label.TextColor3 = Color3.fromRGB(255, 90, 90)
+                        label.TextStrokeTransparency = 0.3
+                        label.TextStrokeColor3 = Color3.new(0, 0, 0)
+                        label.Font = Enum.Font.GothamBold
+                        label.TextSize = 11
+
+                        carcassESPObjects[model] = {Billboard = billboard, Label = label}
+                        data = carcassESPObjects[model]
+                    end
+
+                    if data and data.Billboard then
+                        data.Billboard.Enabled = true
+                    end
+                else
+                    removeCarcassESP(model)
+                end
+            else
+                removeCarcassESP(model)
+            end
         end
     end
 end)
@@ -982,9 +1046,10 @@ Players.PlayerRemoving:Connect(removeESP)
 for _,player in ipairs(Players:GetPlayers()) do if player~=LP then if player.Character then createESP(player) end player.CharacterAdded:Connect(function() task.wait(1); createESP(player) end) end end
 
 --============================================================
--- KILL AURA (ATACA TODOS NO RAIO SIMULTANEAMENTE)
+-- KILL AURA MULTIALVO SIMULTÂNEO (ATACA TODOS NO RAIO AO MESMO TEMPO)
 --============================================================
 local AttackRemote=ReplicatedStorage:WaitForChild("AttackHandlerRemoteEvent")
+
 function attackAura()
     local char=LP.Character; if not char then return end
     local myRoot=char:FindFirstChild("HumanoidRootPart"); if not myRoot then return end
@@ -1003,8 +1068,14 @@ function attackAura()
         end
     end
 end
+
 killAuraButton.MouseButton1Click:Connect(function() killAuraEnabled=not killAuraEnabled; lastAttack=0 end)
-RunService.Heartbeat:Connect(function() if killAuraEnabled and os.clock()-lastAttack>=0.20 then lastAttack=os.clock(); attackAura() end end)
+RunService.Heartbeat:Connect(function() 
+    if killAuraEnabled and os.clock()-lastAttack>=0.15 then 
+        lastAttack=os.clock()
+        attackAura() 
+    end 
+end)
 
 --============================================================
 -- LÓGICA DO AUTO GRAB (COM COLISÃO NORMAL, SEM AFUNDAR)
